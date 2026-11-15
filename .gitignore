@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+venv/
+__pycache__/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Build output
+dist/
+build/
+
+# Media (clips are large — keep them out of git)
+*.mp4
+*.mov
+*.mkv
+*.avi
+clips/
+renders/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
