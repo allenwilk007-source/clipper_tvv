@@ -1,113 +1,173 @@
-# gta-6-clipping
+# Saturation Feed
 
-Watches Twitch chat on many channels at once, notices when a channel's chat
-suddenly jumps well above its own normal pace, and cuts a clip out of a rolling
-recording.
+A live feed of stream moments that leads with the one number nothing else
+shows: **how many clippers already grabbed it.**
 
-Chat is a crude signal — it is free to type, so it reacts to jokes, raids and
-nothing at all. But it is the only signal that needs no video understanding,
-which is why this runs on a laptop instead of a GPU cluster.
+Every clipping tool answers "what's hot." Hot is where the crowd already is. A
+clipper racing two hundred people to the same forty seconds has already lost.
+The useful question is *hot and not yet flooded*, and nobody reports it.
 
-## Requirements
+## The trick
 
-- Python 3.10+
-- [ffmpeg](https://ffmpeg.org/) on `PATH`
-- [streamlink](https://streamlink.github.io/) on `PATH` (`pip install streamlink`)
-- optional: `pip install faster-whisper` for captions
+A native Twitch clip is a **costly** signal. Chat is free — anyone can type
+"LMAOO" — but creating a clip means someone watched something, decided it was
+worth keeping, and acted. Cluster those clips by broadcaster and position in
+the VOD, and two things fall out of one API call:
 
-No Twitch account, OAuth token or API key. Chat is read over anonymous IRC with
-a `justinfan` nick, which is read-only and has no quota.
+- a cluster forming &nbsp;=&nbsp; **a moment happened**
+- the cluster's size &nbsp;=&nbsp; **how many people already have it**
 
-## Usage
+Detection and saturation are the same measurement. Chat velocity rides on top
+as the *lead* signal — it moves before anyone has finished clipping — but never
+declares a moment on its own.
 
-```bash
-python clipper.py jynxzi
-```
+Nothing analyses video. It runs on a laptop.
 
-```bash
-python clipper.py caseoh_ jynxzi xqc --quality 720p
-```
+## Quick start
 
 ```bash
-python clipper.py --channels-file top200.txt --watch-only
+npm start
 ```
+
+Then open <http://localhost:3000>. With no credentials the page tells you what
+to do; with credentials it starts polling immediately.
+
+To see the interface before the game is out, when the category is empty:
 
 ```bash
-python clipper.py jynxzi --captions --z 4.0 --pre 30
+npm start
 ```
 
-`--channels-file` takes one channel per line; `#` starts a comment.
+and open <http://localhost:3000/?demo=1>.
 
-Clips land in `clips/session-<timestamp>/<channel>/`, and every spike is
-appended to `spikes.jsonl` whether or not it was recorded.
+### Credentials
 
-## How it works
+Twitch's public endpoints still need an app token.
 
-1. **streamlink** pipes each live stream into **ffmpeg**, which remuxes it
-   (`-c copy`, so no decoding) into fixed-length `.ts` segments.
-2. Segments older than `--dvr` are deleted. Disk use is bounded by the window,
-   not by how long you leave it running.
-3. Chat is read over pooled anonymous IRC connections — one socket carries ~18
-   channels — and messages are counted per channel in `--bucket`-second buckets.
-4. Each channel is scored against **its own** recent pace as a robust z-score:
-   `(count − median) / MAD`. Above `--z`, it's a moment.
-5. The segments covering the window are concatenated and re-encoded into an mp4,
-   optionally with an `.srt` beside it.
+1. Register an app at [dev.twitch.tv/console/apps](https://dev.twitch.tv/console/apps)
+   (OAuth redirect `http://localhost`, category "Application Integration")
+2. `cp .env.example .env`
+3. Paste the Client ID and a generated Client Secret into `.env`
+4. `npm start`
 
-## Three choices worth knowing about
+Check it works without launching the server:
 
-**The baseline is a median and MAD, not a mean and standard deviation.** Both
-ignore the spikes themselves, so a channel that pops repeatedly doesn't slowly
-raise its own bar and stop detecting its own moments.
+```bash
+npm run check
+```
 
-**The score is in units of each channel's own volatility**, which is what makes
-one threshold work across channel sizes. A fixed "3× the usual" fires constantly
-on a small chat and almost never on a huge steady one; 3.5 MADs out means the
-same thing to both.
+That resolves the category, counts live channels, pulls the clip window, and
+prints the moments it clusters into.
 
-**The clip window is weighted backwards** — 25 s before the spike, 5 s after.
-Chat reacts *after* the thing happens, so a window centred on the spike mostly
-captures people typing about something that already left the screen.
+## How a moment gets ranked
 
-## Tuning
+```
+heat        = log1p(clips per minute) * 2  +  chat z-score
+recency     = exp(-minutes since the last clip / 12)
+opportunity = heat * recency / (1 + saturation) ^ 0.9
+```
 
-| flag | default | what it does |
+The `log1p` matters more than it looks. Clip velocity *is* saturation divided
+by span, so feeding raw velocity into the numerator while dividing by
+saturation lets the two cancel — the score then climbs with clip count, which
+is precisely backwards. A test caught that. Log keeps velocity as evidence the
+moment is real while growing far too slowly to out-argue the crowding penalty,
+so more clippers on a moment always lowers its rank.
+
+Chat enters raw, because it is the only input independent of how many people
+have already clipped.
+
+| state | clips | meaning |
 | --- | --- | --- |
-| `--bucket` | 10 | seconds per count bucket. Smaller reacts faster and noisier |
-| `--history` | 30 | buckets of baseline. 30 × 10 s = 5 min of context |
-| `--z` | 3.5 | robust z-score to fire at. Lower = more clips, more junk |
-| `--floor` | 20 | absolute messages/bucket minimum. Kills dead-chat noise |
-| `--min-rise` | 1.5 | must also be 1.5× the median. Kills tiny absolute bumps |
-| `--cooldown` | 60 | seconds between clips, per channel |
-| `--pre` / `--post` | 25 / 5 | clip window around the spike |
-| `--dvr` | 180 | seconds of rolling recording kept per channel |
-| `--segment` | 10 | DVR segment length. Sets cut granularity |
-| `--encoders` | auto | concurrent ffmpeg cuts. Auto is `cores / 3`, capped at 4 |
+| `fresh` | 1–2 | proven interesting, basically untouched |
+| `warm` | 3–6 | a few people are on it |
+| `flooded` | 7+ | you are late |
 
-Start with `--watch-only` on a long channel list for an hour. It records
-nothing and costs almost nothing, and the resulting `spikes.jsonl` tells you
-which channels actually pop — which is where you then point your bandwidth.
+Deep links start 20 seconds early (`LEAD_IN_SECONDS`), because chat reacts
+after the thing happens and so do clippers.
 
-## Cost per channel
+## Chat scoring
 
-| quality | bandwidth | DVR at 180 s |
-| --- | --- | --- |
-| 480p | ~1.5 Mbps | ~34 MB |
-| 720p | ~3 Mbps | ~67 MB |
-| 1080p60 | ~8 Mbps | ~180 MB |
+A robust z-score against each channel's **own** recent pace:
+`(count − median) / MAD`, in 10-second buckets over 5 minutes of history.
 
-Multiply by channel count. Bandwidth, not CPU or disk, is the ceiling on how
-many channels you can *record* — so monitor widely and record narrowly.
+Median and MAD both ignore the spikes themselves, so a channel that pops
+repeatedly doesn't quietly raise its own bar and stop detecting its own
+moments. Because the score is in units of that channel's volatility, one
+threshold works for a 200k-viewer channel and a 2k-viewer one at once — where a
+flat "3× busier than usual" fires constantly on a small chat and never on a
+large steady one.
+
+Chat is read over pooled anonymous IRC (`justinfan` nicks, 18 channels per
+socket, joins paced to Twitch's ~20-per-10s limit). No account, no token, no
+quota.
 
 ## Known limits
 
-- **Live only.** Twitch does not let you rewind a stream you weren't recording.
-  Nothing here can reach back before you started.
-- **Chat lies.** It spikes for raids, emote spam, chat games and arguments about
-  nothing. Expect to throw clips away; `--z` is how you trade volume for hit rate.
-- **You still have to choose.** Monitoring is cheap, recording is not. Watching
-  200 channels is free; recording 200 is 600 Mbps.
-- **Captions may not run.** `faster-whisper` needs `ctranslate2`'s native
-  extension, which Windows Application Control blocks on some machines
-  (`DLL load failed while importing _ext`). That's a machine security policy,
-  not a bug here — the rest of the pipeline doesn't depend on it.
+Worth reading before launch night rather than during it.
+
+- **Twitch sorts `/helix/clips` by view count, not creation time.** Over a
+  short window that barely matters — brand-new clips all sit near zero views —
+  but a truncated result drops the quietest clips first. The feed reports
+  truncation instead of hiding it; raise `CLIP_MAX_PAGES` or shorten
+  `CLIP_WINDOW_MINUTES` if you see it.
+- **VOD position lags.** For a minute or two after a clip is made, Twitch
+  hasn't published its `vod_offset`. Those cluster on creation time instead and
+  are marked "VOD position pending" — coarser, but it keeps the freshest
+  moments in the feed rather than dropping them.
+- **Launch week compresses the chat signal.** Every GTA 6 chat will sit at
+  maximum excitement for days, so baselines rise everywhere and spikes get
+  harder to separate exactly when it matters. Clip-creation rate degrades far
+  more gracefully, which is the other reason it's the primary signal.
+- **Twitch only.** Kick has no official public API and is hostile to scraping;
+  YouTube's live chat API burns quota per poll. Both are deliberately out.
+- **Saturation is Twitch-native only.** It counts clips made *on Twitch*. It
+  does not know whether a moment has already flooded TikTok — that's a leading
+  indicator of flooding, not a measure of it.
+- **Not verified against live data.** Every path has been exercised against the
+  demo fixture and the clustering and ranking are covered by tests, but no run
+  against a real category has happened yet. The first real run is the real
+  test.
+
+## Configuration
+
+Everything lives in `.env` — see `.env.example` for the annotated list.
+
+`GAME_NAME` is the only field that needs changing to point the whole thing at a
+different game. The engine is category-agnostic; GTA 6 is the wedge, not the
+product.
+
+## Layout
+
+```
+src/twitch.js   Helix client — app token, rate limits, pagination
+src/moments.js  clustering + the ranking formula (the product)
+src/chat.js     pooled anonymous IRC, median/MAD spike scoring
+src/feed.js     polling loops and current state
+src/server.js   HTTP + static
+src/demo.js     fixture, pushed through the real pipeline
+src/check.js    one-shot smoke test
+public/         the feed UI
+```
+
+```bash
+npm test
+```
+
+## Not built yet
+
+The data this accumulates — who found a moment first, before it saturated, and
+what it went on to do — is an un-fakeable record of which clippers are actually
+early. That's the part worth selling, and it isn't here yet.
+
+## History
+
+This repo previously held `clipper.py`, a multi-channel chat-spike clipper with
+a DVR ring buffer and ffmpeg cutting. It was removed when the project narrowed
+to saturation, but it is not lost — it's at commit `bd1ceec`:
+
+```bash
+git show bd1ceec:clipper.py > clipper.py
+```
+
+Its median/MAD scoring is the direct ancestor of `src/chat.js`.

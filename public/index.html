@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Saturation Feed</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <div class="bar-left">
+        <h1>Saturation&nbsp;Feed</h1>
+        <span class="game" id="game">connecting…</span>
+      </div>
+      <div class="bar-right" id="stats"></div>
+    </header>
+
+    <nav class="controls">
+      <div class="chips" id="filters">
+        <button class="chip is-on" data-filter="all">All</button>
+        <button class="chip" data-filter="fresh">Fresh</button>
+        <button class="chip" data-filter="warm">Warm</button>
+        <button class="chip" data-filter="flooded">Flooded</button>
+      </div>
+      <label class="sort">
+        Sort
+        <select id="sort">
+          <option value="opportunity">Opportunity</option>
+          <option value="newest">Newest</option>
+          <option value="saturation">Most clipped</option>
+          <option value="chat">Chat spike</option>
+        </select>
+      </label>
+    </nav>
+
+    <main id="feed" class="feed"></main>
+
+    <template id="card-template">
+      <article class="card">
+        <div class="sat">
+          <span class="sat-count"></span>
+          <span class="sat-label">clippers</span>
+        </div>
+        <div class="body">
+          <div class="row-top">
+            <span class="state"></span>
+            <a class="broadcaster" target="_blank" rel="noopener"></a>
+            <span class="new-clips"></span>
+          </div>
+          <p class="title"></p>
+          <div class="meta"></div>
+        </div>
+        <a class="open" target="_blank" rel="noopener">Open at moment</a>
+      </article>
+    </template>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
