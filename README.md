@@ -1,23 +1,22 @@
-# GTA 6 Clipping
+# gta-6-clipping
 
-Live Twitch chat-spike clipper. Records a stream as it airs, watches chat for
-spikes, and cuts a clip around each one — so clips are ready while the stream
-is still live, instead of after the VOD goes up and everyone has the same
-moments.
+Watches Twitch chat on many channels at once, notices when a channel's chat
+suddenly jumps well above its own normal pace, and cuts a clip out of a rolling
+recording.
 
-## Why chat
-
-Chat is the only "something just happened" signal that needs no video
-understanding, so the whole thing runs on a laptop with no GPU. It is also a
-*free* signal — anyone can type "LMAOO" — so expect false positives until you
-tune the threshold for the channel you are watching.
+Chat is a crude signal — it is free to type, so it reacts to jokes, raids and
+nothing at all. But it is the only signal that needs no video understanding,
+which is why this runs on a laptop instead of a GPU cluster.
 
 ## Requirements
 
 - Python 3.10+
-- [ffmpeg](https://ffmpeg.org/) on PATH
-- `pip install streamlink`
-- Optional captions: `pip install faster-whisper`
+- [ffmpeg](https://ffmpeg.org/) on `PATH`
+- [streamlink](https://streamlink.github.io/) on `PATH` (`pip install streamlink`)
+- optional: `pip install faster-whisper` for captions
+
+No Twitch account, OAuth token or API key. Chat is read over anonymous IRC with
+a `justinfan` nick, which is read-only and has no quota.
 
 ## Usage
 
@@ -26,48 +25,89 @@ python clipper.py jynxzi
 ```
 
 ```bash
-python clipper.py caseoh_ --quality best --multiplier 3.5 --captions
+python clipper.py caseoh_ jynxzi xqc --quality 720p
 ```
 
 ```bash
-python clipper.py kaicenat --duration 3600 --pre 30 --post 8
+python clipper.py --channels-file top200.txt --watch-only
 ```
 
-Clips land in `clips/<channel>-<timestamp>/`, alongside the full recording
-(`stream.ts`) and a `spikes.jsonl` log of every moment that fired.
+```bash
+python clipper.py jynxzi --captions --z 4.0 --pre 30
+```
+
+`--channels-file` takes one channel per line; `#` starts a comment.
+
+Clips land in `clips/session-<timestamp>/<channel>/`, and every spike is
+appended to `spikes.jsonl` whether or not it was recorded.
 
 ## How it works
 
-1. `streamlink` records the stream the moment it goes live
-2. Twitch chat is read anonymously over IRC — no account, no OAuth token
-3. messages are counted in 10-second buckets; a bucket that beats the rolling
-   **median** by `--multiplier` is a spike
-4. `ffmpeg` cuts a window around the spike and re-encodes it
-5. `faster-whisper` writes an `.srt` beside the clip, if `--captions` is set
+1. **streamlink** pipes each live stream into **ffmpeg**, which remuxes it
+   (`-c copy`, so no decoding) into fixed-length `.ts` segments.
+2. Segments older than `--dvr` are deleted. Disk use is bounded by the window,
+   not by how long you leave it running.
+3. Chat is read over pooled anonymous IRC connections — one socket carries ~18
+   channels — and messages are counted per channel in `--bucket`-second buckets.
+4. Each channel is scored against **its own** recent pace as a robust z-score:
+   `(count − median) / MAD`. Above `--z`, it's a moment.
+5. The segments covering the window are concatenated and re-encoded into an mp4,
+   optionally with an `.srt` beside it.
 
-The baseline is a median rather than a mean so the spikes do not inflate it,
-and `--floor` stops a dead chat going from 1 message to 4 and calling that a
-moment.
+## Three choices worth knowing about
+
+**The baseline is a median and MAD, not a mean and standard deviation.** Both
+ignore the spikes themselves, so a channel that pops repeatedly doesn't slowly
+raise its own bar and stop detecting its own moments.
+
+**The score is in units of each channel's own volatility**, which is what makes
+one threshold work across channel sizes. A fixed "3× the usual" fires constantly
+on a small chat and almost never on a huge steady one; 3.5 MADs out means the
+same thing to both.
+
+**The clip window is weighted backwards** — 25 s before the spike, 5 s after.
+Chat reacts *after* the thing happens, so a window centred on the spike mostly
+captures people typing about something that already left the screen.
 
 ## Tuning
 
-| Flag | Default | Notes |
-|------|---------|-------|
-| `--multiplier` | 3.0 | Lower = more clips, more junk |
-| `--floor` | 15 | Minimum messages in a bucket to count at all |
-| `--cooldown` | 60 | Seconds before another clip can fire |
-| `--pre` / `--post` | 25 / 5 | Window around the spike |
-| `--duration` | 0 | Stop after N seconds (0 = until stream ends) |
+| flag | default | what it does |
+| --- | --- | --- |
+| `--bucket` | 10 | seconds per count bucket. Smaller reacts faster and noisier |
+| `--history` | 30 | buckets of baseline. 30 × 10 s = 5 min of context |
+| `--z` | 3.5 | robust z-score to fire at. Lower = more clips, more junk |
+| `--floor` | 20 | absolute messages/bucket minimum. Kills dead-chat noise |
+| `--min-rise` | 1.5 | must also be 1.5× the median. Kills tiny absolute bumps |
+| `--cooldown` | 60 | seconds between clips, per channel |
+| `--pre` / `--post` | 25 / 5 | clip window around the spike |
+| `--dvr` | 180 | seconds of rolling recording kept per channel |
+| `--segment` | 10 | DVR segment length. Sets cut granularity |
+| `--encoders` | auto | concurrent ffmpeg cuts. Auto is `cores / 3`, capped at 4 |
 
-Chat reacts *after* the thing happens, so the moment sits a few seconds before
-the spike — that is why the window is weighted to `--pre`. On a very busy
-channel raise `--multiplier`; on a quiet one lower `--floor`.
+Start with `--watch-only` on a long channel list for an hour. It records
+nothing and costs almost nothing, and the resulting `spikes.jsonl` tells you
+which channels actually pop — which is where you then point your bandwidth.
+
+## Cost per channel
+
+| quality | bandwidth | DVR at 180 s |
+| --- | --- | --- |
+| 480p | ~1.5 Mbps | ~34 MB |
+| 720p | ~3 Mbps | ~67 MB |
+| 1080p60 | ~8 Mbps | ~180 MB |
+
+Multiply by channel count. Bandwidth, not CPU or disk, is the ceiling on how
+many channels you can *record* — so monitor widely and record narrowly.
 
 ## Known limits
 
-- **Live only.** You cannot rewind a stream that already ended.
-- **Pick the right stream in advance.** Record the wrong channel and you have
-  an hour of nothing. This is the real constraint, more than the one above.
-- **Captions need a native extension.** `faster-whisper` pulls in `ctranslate2`,
-  whose DLL can be blocked by Windows Application Control. Everything else
-  works without it.
+- **Live only.** Twitch does not let you rewind a stream you weren't recording.
+  Nothing here can reach back before you started.
+- **Chat lies.** It spikes for raids, emote spam, chat games and arguments about
+  nothing. Expect to throw clips away; `--z` is how you trade volume for hit rate.
+- **You still have to choose.** Monitoring is cheap, recording is not. Watching
+  200 channels is free; recording 200 is 600 Mbps.
+- **Captions may not run.** `faster-whisper` needs `ctranslate2`'s native
+  extension, which Windows Application Control blocks on some machines
+  (`DLL load failed while importing _ext`). That's a machine security policy,
+  not a bug here — the rest of the pipeline doesn't depend on it.
