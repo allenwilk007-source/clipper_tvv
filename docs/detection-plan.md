@@ -239,6 +239,27 @@ Not significant. **Stream audio does not lead chat in any way this can
 measure**, and the ~7s median lag quoted from the first run is not a real
 quantity to design around.
 
+And the sign test was itself the wrong question, which downstream spotted
+before this side did. Whether the peak falls before or after the moment
+barely matters for cutting: a peak a few seconds late still frames well, one
+tens of seconds out does not, and the sign is identical in both cases. The
+question that bears on a cut is the *magnitude* — is the peak near the
+moment?
+
+Asked that way, over the same 60: median |peak − chat| is **12.6 s**, and only
+42% land within 10 s. Neither candidate gate moves it. Isolation gives 12.6,
+11.3, 15.0, 15.0, 11.1, 20.4 s as the floor rises; burst gives 12.6, 11.3,
+11.3, 12.7, 9.6 s. The histogram of peak − chat is close to flat right across
+the ±30 s probe window, and stays flat inside every gated subset.
+
+That last detail is the giveaway. A peak placed uniformly at random in a ±30 s
+window would give a mean |lag| of 15 s and 33% within 10 s; the measurement is
+12.6 s and 42%. Fractionally tighter than chance and nothing like a usable
+band. **The spread is set by the width of the probe window, not by anything
+about the stream** — widen the window and the lag grows to match. A number
+that tracks your own instrument rather than the world is not a measurement of
+the world.
+
 Two habits this should buy:
 
 1. **A 2-sigma result at n=45 is a hypothesis, not a finding.** It was
