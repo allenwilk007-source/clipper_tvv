@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { Store, HORIZONS } from './store.js';
+import { SCHEMA_VERSION, Store, HORIZONS } from './store.js';
 import { evaluate, leadTimeSeconds, loadRows } from './eval.js';
 
 const BASE = Date.parse('2026-11-19T20:00:00Z');
@@ -148,5 +148,53 @@ test('a moment first seen in chat and later confirmed is recorded as both', () =
   // detected_at is when WE first saw it and must never be overwritten — it is
   // the number the whole product is judged on.
   assert.equal(row.detected_at, new Date(BASE).toISOString());
+  store.close();
+});
+
+test('the schema records its version so a later one can migrate it', () => {
+  const store = new Store(':memory:');
+  assert.equal(store.version, SCHEMA_VERSION);
+  assert.equal(store.all('pragma user_version')[0].user_version, SCHEMA_VERSION);
+  store.close();
+});
+
+test('pruning drops the bulk but never the row eval depends on', () => {
+  const store = new Store(':memory:');
+  const moment = { id: 'm1', broadcaster: 'x', saturation: 1, clipIds: [], opportunity: 7 };
+
+  // One moment, polled every 30s for a simulated month.
+  for (let i = 0; i < 40; i += 1) {
+    store.recordPoll({ moments: [{ ...moment }], at: new Date(BASE + i * 86_400_000) });
+  }
+  assert.equal(store.counts().observations, 40);
+
+  const pruned = store.pruneOlderThan(14, { now: BASE + 40 * 86_400_000 });
+  assert.ok(pruned.observations > 0, 'expected old observations to go');
+
+  // The earliest observation is what the feed claimed while the moment was
+  // still actionable, so eval reads it and prune must never take it.
+  const remaining = store.all('select observed_at from observations order by observed_at asc');
+  assert.equal(remaining[0].observed_at, new Date(BASE).toISOString());
+  assert.equal(store.counts().moments, 1);
+  store.close();
+});
+
+test('the longitudinal tables are never pruned', () => {
+  // The clipper index is built from these and cannot be re-collected, so
+  // pruning them would throw away the one asset nothing can rebuild.
+  const store = new Store(':memory:');
+  store.recordPoll({
+    moments: [{ id: 'm1', broadcaster: 'x', saturation: 1, clipIds: ['c1'] }],
+    clipsById: new Map([['c1', { id: 'c1', creator_name: 'alice', created_at: at(0), view_count: 1 }]]),
+    at: new Date(BASE),
+  });
+  store.recordOutcome({ momentId: 'm1', horizon: HORIZONS[0], clips: [], at: new Date(BASE) });
+
+  store.pruneOlderThan(1, { now: BASE + 400 * 86_400_000 });
+
+  const counts = store.counts();
+  assert.equal(counts.moments, 1);
+  assert.equal(counts.clips, 1);
+  assert.equal(counts.outcomes, 1);
   store.close();
 });

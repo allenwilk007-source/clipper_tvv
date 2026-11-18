@@ -19,10 +19,10 @@
 import { config } from './config.js';
 import {
   CLASS_NAMES,
-  classify,
-  copypastaRatio,
-  normalizeMessage,
+  addMessage,
+  createBucket,
   reactionScore,
+  summarizeBucket,
 } from './reactions.js';
 
 const IRC_URL = 'wss://irc-ws.chat.twitch.tv:443';
@@ -131,30 +131,18 @@ class ChannelCounter {
   }
 
   resetBucket() {
-    this.current = 0;
-    this.seen = new Set(); // distinct chatters this bucket
-    this.repeats = new Map(); // normalised message -> count
-    this.classCounts = new Map(CLASS_NAMES.map((name) => [name, 0]));
+    this.bucket = createBucket();
   }
 
   bump(nick, message) {
-    this.current += 1;
-    if (nick) this.seen.add(nick);
-
-    const key = normalizeMessage(message);
-    if (key) this.repeats.set(key, (this.repeats.get(key) || 0) + 1);
-
-    for (const name of classify(message)) {
-      this.classCounts.set(name, this.classCounts.get(name) + 1);
-    }
+    addMessage(this.bucket, nick, message);
   }
 
   /** Close the bucket, score every series against its history, fold it in. */
   roll() {
-    const count = this.current;
-    const chatters = this.seen.size;
-    const pasta = copypastaRatio([...this.repeats.values()]);
-    const classCounts = this.classCounts;
+    const { messages: count, chatters, copypasta: pasta, classes: classCounts } =
+      summarizeBucket(this.bucket);
+    // The bucket, and every message in it, is dropped here.
     this.resetBucket();
 
     const volumeZ = this.volume.push(count);

@@ -96,6 +96,48 @@ export function copypastaRatio(counts) {
 }
 
 /**
+ * A ten-second bucket of chat, as counts.
+ *
+ * These three are the whole extraction step, kept pure and separate from the
+ * socket so the scoring can be tested without one.
+ *
+ * Note what a bucket does NOT hold: the messages. Text is folded into counts
+ * as it arrives and the bucket is dropped on roll, so nothing retains chat.
+ * At launch volume that is a lot of text not kept, and retained chat logs are
+ * a liability with no upside here — every signal below is derivable live.
+ */
+export const createBucket = () => ({
+  messages: 0,
+  chatters: new Set(),
+  // Normalised text only, and only until the bucket rolls — this is what makes
+  // "how much of this was people repeating each other" answerable at all.
+  repeats: new Map(),
+  classes: new Map(CLASS_NAMES.map((name) => [name, 0])),
+});
+
+export function addMessage(bucket, nick, message) {
+  bucket.messages += 1;
+  if (nick) bucket.chatters.add(nick);
+
+  const key = normalizeMessage(message);
+  if (key) bucket.repeats.set(key, (bucket.repeats.get(key) || 0) + 1);
+
+  for (const name of classify(message)) {
+    bucket.classes.set(name, bucket.classes.get(name) + 1);
+  }
+  return bucket;
+}
+
+export function summarizeBucket(bucket) {
+  return {
+    messages: bucket.messages,
+    chatters: bucket.chatters.size,
+    copypasta: copypastaRatio([...bucket.repeats.values()]),
+    classes: new Map(bucket.classes),
+  };
+}
+
+/**
  * Collapse the per-class z-scores into the single number the ranking consumes.
  *
  * Everything is clamped at zero first: a channel being *quieter* than usual is

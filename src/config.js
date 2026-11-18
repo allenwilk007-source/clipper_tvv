@@ -64,6 +64,9 @@ export const config = {
   storePath: resolve(root, process.env.STORE_PATH || 'data/feed.db'),
   outcomePollSeconds: num(process.env.OUTCOME_POLL_SECONDS, 60),
   outcomeBatch: num(process.env.OUTCOME_BATCH, 20),
+  // Only observations are pruned — see pruneOlderThan in store.js for why the
+  // moments/clips/outcomes history is kept regardless.
+  storePruneDays: num(process.env.STORE_PRUNE_DAYS, 14),
 
   // Local clip extraction. The window is lopsided on purpose: see clip.js.
   clipPre: num(process.env.CLIP_PRE, 25),

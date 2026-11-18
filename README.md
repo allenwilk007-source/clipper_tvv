@@ -205,6 +205,28 @@ which are a starting position rather than a result.
 
 With no history it says so, rather than printing a confident zero.
 
+### What is kept, and what is not
+
+**No chat is stored.** Messages are folded into per-bucket counts as they
+arrive and the bucket is dropped every ten seconds — the store has no column
+that could hold a message, and nothing in a bucket summary can be turned back
+into what anybody said. At launch volume that is a great deal of text not kept,
+and retained chat logs are a liability with no upside: every signal here is
+derivable live.
+
+`observations` (one row per moment per poll, around 300 a minute at a 30s
+cadence with 150 moments) is pruned to `STORE_PRUNE_DAYS`, except for the
+earliest row of each moment, which is what the feed claimed while the moment
+was still actionable and therefore what `eval` reads.
+
+`moments`, `clips` and `outcomes` are never pruned. They are what the clipper
+index gets built from, they cannot be re-collected after the fact, and they are
+small: a measured launch-scale poll of 150 moments and 669 clips writes in one
+transaction in under 3ms.
+
+The schema carries a `user_version`, so a later phase can add columns without
+throwing away data that cannot be collected twice.
+
 ## How a moment gets ranked
 
 ```

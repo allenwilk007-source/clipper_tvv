@@ -9,10 +9,13 @@ import { test } from 'node:test';
 import { ChatWatcher, Series } from './chat.js';
 import {
   REACTION_WEIGHTS,
+  addMessage,
   classify,
   copypastaRatio,
+  createBucket,
   normalizeMessage,
   reactionScore,
+  summarizeBucket,
 } from './reactions.js';
 
 test('chat asking for a clip is caught, chat discussing clips is not', () => {
@@ -212,4 +215,32 @@ test('a dead chat with two messages is still not a spike', () => {
 
   assert.equal(watcher.candidates({ now: 1_000_000 }).length, 0);
   watcher.stop();
+});
+
+test('a bucket summarises chat without keeping any of it', () => {
+  const bucket = createBucket();
+  for (const [nick, text] of [
+    ['alice', 'KEKW'],
+    ['bob', 'KEKW'],
+    ['bob', 'clip that'],
+    ['carol', 'what is happening'],
+  ]) {
+    addMessage(bucket, nick, text);
+  }
+
+  const summary = summarizeBucket(bucket);
+  assert.equal(summary.messages, 4);
+  assert.equal(summary.chatters, 3); // bob twice is still one chatter
+  assert.equal(summary.classes.get('funny'), 2);
+  assert.equal(summary.classes.get('clipit'), 1);
+  assert.equal(summary.copypasta, 0.5); // two of four were the same thing
+
+  // The signals survive; the chat does not. Nothing in the summary can be
+  // turned back into what anybody said.
+  const serialised = JSON.stringify(summary, (_, v) =>
+    v instanceof Map ? Object.fromEntries(v) : v,
+  );
+  for (const text of ['KEKW', 'clip that', 'what is happening', 'alice', 'bob']) {
+    assert.ok(!serialised.includes(text), `summary leaked ${text}`);
+  }
 });

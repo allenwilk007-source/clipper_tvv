@@ -17,6 +17,8 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
+import { config } from './config.js';
+
 // When to look back at a moment and ask what became of it. 15m catches the
 // flood forming, 24h is where a clip's view count has mostly settled.
 export const HORIZONS = [
@@ -25,6 +27,12 @@ export const HORIZONS = [
   { name: '6h', seconds: 6 * 60 * 60 },
   { name: '24h', seconds: 24 * 60 * 60 },
 ];
+
+// Bumped whenever SCHEMA changes shape. `create table if not exists` makes a
+// fresh database free, but an existing one needs to know what it is already
+// holding — Phase 2 adds columns, and by then there will be launch-week data
+// in here that must not be thrown away to get them.
+export const SCHEMA_VERSION = 1;
 
 const SCHEMA = `
 create table if not exists moments (
@@ -87,7 +95,7 @@ export class Store {
     this.db = new DatabaseSync(path);
     this.db.exec('pragma journal_mode = wal');
     this.db.exec('pragma synchronous = normal');
-    this.db.exec(SCHEMA);
+    this.version = this.migrate();
 
     // Prepared once and reused: this runs on every poll, every 30 seconds,
     // for every moment in the window.
@@ -140,6 +148,49 @@ export class Store {
           (select count(*) from outcomes) as outcomes
       `),
     };
+  }
+
+  /**
+   * Bring the database up to SCHEMA_VERSION.
+   *
+   * Deliberately additive: later versions add statements to the ladder below
+   * and never rewrite history. By the time this matters there will be data in
+   * here that cannot be re-collected — the clipper index is longitudinal, so a
+   * migration that drops a table drops the one asset nothing can rebuild.
+   */
+  migrate() {
+    const current = this.db.prepare('pragma user_version').get().user_version ?? 0;
+    this.db.exec(SCHEMA);
+
+    // if (current < 2) this.db.exec('alter table moments add column ...');
+
+    if (current !== SCHEMA_VERSION) this.db.exec(`pragma user_version = ${SCHEMA_VERSION}`);
+    return SCHEMA_VERSION;
+  }
+
+  /**
+   * Drop the bulk, keep the asset.
+   *
+   * `observations` is the only table that grows without bound — one row per
+   * moment per poll, roughly 500 a minute at launch — and `eval` reads just the
+   * EARLIEST one per moment, which is what the feed claimed while the moment
+   * was still actionable. So old observations go and the first one always
+   * stays.
+   *
+   * moments, clips and outcomes are never pruned here. They are the
+   * longitudinal record the clipper index is built from, they cannot be
+   * re-collected after the fact, and they are small by comparison.
+   */
+  pruneOlderThan(days = config.storePruneDays, { now = Date.now() } = {}) {
+    const cutoff = new Date(now - Math.max(1, days) * 86_400_000).toISOString();
+    const result = this.db
+      .prepare(
+        `delete from observations
+          where observed_at < ?
+            and rowid not in (select min(rowid) from observations group by moment_id)`,
+      )
+      .run(cutoff);
+    return { observations: result.changes ?? 0, cutoff };
   }
 
   /**

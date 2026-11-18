@@ -36,6 +36,7 @@ export class Feed {
     // once per spiking channel and kept for the length of that broadcast.
     this.channels = new Map();
     this.outcomeCursor = 0;
+    this.lastPruneAt = Date.now();
 
     this.lastClipPoll = null;
     this.lastStreamPoll = null;
@@ -195,6 +196,14 @@ export class Feed {
     if (!this.store) return 0;
     const horizon = HORIZONS[this.outcomeCursor % HORIZONS.length];
     this.outcomeCursor += 1;
+
+    // Observations are the only table that grows without bound, so trim them
+    // on a slow cycle rather than on a timer of their own.
+    if (Date.now() - this.lastPruneAt > 6 * 3600_000) {
+      this.lastPruneAt = Date.now();
+      const pruned = this.store.pruneOlderThan();
+      if (pruned.observations) this.log(`pruned ${pruned.observations} old observations`);
+    }
 
     const due = this.store.dueForOutcome(horizon, { limit: config.outcomeBatch });
     let checked = 0;
