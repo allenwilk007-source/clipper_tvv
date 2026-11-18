@@ -540,26 +540,34 @@ export function postPartsFor(
   const tiktokHook = fitText(`${line ? `"${line}"` : what} ${emoji}`.trim().toLowerCase(), TIKTOK_HOOK_MAX);
   const instaHook = fitText(`${what}${line ? ` — "${line}"` : ''} ${emoji}`.trim(), INSTAGRAM_HOOK_MAX);
   const credit = who ? `Credit: ${who} on Twitch` : '';
-  // A link worked out when the short was made is kept as it was.
-  const link = knownLink || (vod ? `https://www.twitch.tv/videos/${vod}?t=${twitchTime(start)}` : '');
+  // A link worked out when the short was made is kept as it was. A short cut
+  // from a live recording has no VOD to point into, so it links the channel:
+  // TERMS.md promises a link back to the source with every clip.
+  const channel = creatorTag(moment).slice(1);
+  const link =
+    knownLink ||
+    (vod ? `https://www.twitch.tv/videos/${vod}?t=${twitchTime(start)}` : channel ? `https://www.twitch.tv/${channel}` : '');
+  const linkLabel = /^https:\/\/www\.twitch\.tv\/[a-z0-9_]+$/i.test(link) ? 'Live on Twitch' : 'Full stream';
 
   return {
     caption: title,
     about: what,
     credit,
     link,
+    linkLabel,
     tags: hashtagsFor(moment, { hashtags }),
     game: moment?.game || null,
     broadcaster: who || null,
     platforms: {
-      tiktok: `${tiktokHook} ${tagsFor('#twitch', '#gaming')}`,
+      // The credit goes in the caption too, not only on the video.
+      tiktok: `${tiktokHook}${who ? ` (credit: ${who.toLowerCase()} on twitch)` : ''} ${tagsFor('#twitch', '#gaming')}`,
       instagram: [instaHook, credit, tagsFor('#gaming', '#twitch', '#reels')].filter(Boolean).join('\n'),
       youtube: [
         youtubeTitle(youtubeAbout, moment),
         '',
         line ? `"${line}"` : null,
         credit || null,
-        link ? `Full stream: ${link}` : null,
+        link ? `${linkLabel}: ${link}` : null,
         '',
         tagsFor('#twitch', '#gaming', '#shorts'),
       ]
@@ -590,7 +598,7 @@ export function postTextFor(moment, options = {}) {
     parts.platforms.youtube.split('\n')[0],
     '',
     parts.credit || null,
-    parts.link ? `Full stream: ${parts.link}` : null,
+    parts.link ? `${parts.linkLabel || 'Full stream'}: ${parts.link}` : null,
     '',
   ]
     .filter((line) => line !== null)

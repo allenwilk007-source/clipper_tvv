@@ -474,3 +474,19 @@ test('a redo renders a window of the wider cut by seeking the input', async () =
   const args = shortformArgs({ ...ARGS, trim: { start: 22.5, duration: 30 } });
   assert.deepEqual(args.slice(args.indexOf('-ss'), args.indexOf('in.mp4') + 1), ['-ss', '22.5', '-t', '30', '-i', 'in.mp4']);
 });
+
+test('every post credits the streamer and links back, live recordings included', () => {
+  // TERMS.md says so in public: a credit line and a link with every clip.
+  const vod = postPartsFor(LIRIK, { caption: 'x 😂', start: 60 });
+  assert.match(vod.link, /twitch\.tv\/videos\/2932444934\?t=0h01m00s/);
+  const live = postPartsFor({ ...LIRIK, vodId: null, broadcaster: 'iShowSpeed' }, { caption: 'x 😂' });
+  assert.equal(live.link, 'https://www.twitch.tv/ishowspeed');
+  assert.match(postTextFor(null, { parts: live }), /\nLive on Twitch: https:\/\/www\.twitch\.tv\/ishowspeed\n/);
+  for (const parts of [vod, live]) {
+    for (const [platform, text] of Object.entries(parts.platforms)) {
+      assert.match(text, new RegExp(parts.broadcaster, 'i'), `${platform} credits`);
+    }
+    assert.match(parts.platforms.tiktok, /\(credit: .+ on twitch\)/);
+    assert.ok(parts.platforms.youtube.includes(parts.link));
+  }
+});

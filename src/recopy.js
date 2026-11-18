@@ -67,7 +67,7 @@ export function recopy({ file, saved = null, record = null, oldText = '', avoid 
   const reaction = reactionFromEmoji(caption);
   const about = describe(moment, { avoid, reaction });
   // The stream link was worked out when the short was made; keep it as it was.
-  const link = saved?.link || /^Full stream: (\S+)/m.exec(oldText)?.[1] || '';
+  const link = saved?.link || /^(?:Full stream|Live on Twitch): (\S+)/m.exec(oldText)?.[1] || '';
   return postPartsFor(moment, { caption, about, avoid, reaction, link });
 }
 
