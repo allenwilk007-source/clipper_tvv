@@ -191,6 +191,7 @@ const snapshotOf = (moment) => ({
   title: moment.title,
   game: moment.game || null,
   audioZ: Number.isFinite(moment.audioZ) ? moment.audioZ : null,
+  audioBurst: Number.isFinite(moment.audioBurst) ? moment.audioBurst : null,
   chat: moment.chat ? { classes: moment.chat.classes } : null,
 });
 
@@ -305,7 +306,15 @@ export class AutoClipper {
         error: ok ? null : job.message,
         caption: ok ? job.caption : null,
         review: job.review
-          ? { ...job.review, audioZ: moment.audioZ ?? null, window: windowFor(moment, this.cfg).source }
+          ? {
+              ...job.review,
+              audioZ: moment.audioZ ?? null,
+              // Detection's burst, beside the meter's own (job.review.burst), so
+              // the two can be compared on real shorts before either replaces
+              // the other.
+              audioBurst: moment.audioBurst ?? null,
+              window: windowFor(moment, this.cfg).source,
+            }
           : null,
       });
     } catch (err) {
