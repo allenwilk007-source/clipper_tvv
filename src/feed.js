@@ -8,6 +8,7 @@ import {
   scoreMoments,
 } from './moments.js';
 import { findLiveArchive } from './archive.js';
+import { probeLoudnessAt } from './audio.js';
 import { HORIZONS, openStore } from './store.js';
 import { Twitch } from './twitch.js';
 
@@ -27,7 +28,7 @@ export class Feed {
    * real IRC sockets the moment it is given a channel, so a test of the
    * chat-only path has to be able to hand in one that does not.
    */
-  constructor({ log = defaultLog, chat, store, watchChannels, findArchive } = {}) {
+  constructor({ log = defaultLog, chat, store, watchChannels, findArchive, probe } = {}) {
     this.log = log;
     // Where a watched channel is recording, found without credentials. Tests
     // inject a stand-in, since the real one runs yt-dlp against Twitch.
@@ -36,6 +37,8 @@ export class Feed {
     this.chat =
       chat !== undefined ? chat : config.chatEnabled ? new ChatWatcher({ log }) : null;
     this.watchChannels = watchChannels || config.watchChannels;
+    // Same reason as findArchive: the real probe spawns yt-dlp and ffmpeg.
+    this.probe = probe || probeLoudnessAt;
 
     // Injected as null by tests, which must not open the real database.
     this.store =
@@ -50,6 +53,9 @@ export class Feed {
     // once per spiking channel and kept for the length of that broadcast.
     this.channels = new Map();
     this.outcomeCursor = 0;
+    // momentId -> {burst, z, at} once probed, or null once attempted and
+    // failed. Either way the moment is never probed twice.
+    this.audioByMoment = new Map();
     this.lastPruneAt = Date.now();
 
     this.lastClipPoll = null;
@@ -171,6 +177,8 @@ export class Feed {
         leadInSeconds: config.leadInSeconds,
       },
     );
+
+    await this.measureAudio(scored);
 
     const nextPrevious = new Map();
     for (const moment of scored) nextPrevious.set(moment.id, moment.saturation);
@@ -377,6 +385,72 @@ export class Feed {
         channel.vodId = false;
       }
     }
+  }
+
+  /**
+   * Attach what the stream sounded like around each moment.
+   *
+   * `audioBurst` is peak-over-median in dB, the same quantity engagement.js
+   * scores downstream, so a cut can reuse this instead of downloading the
+   * audio a second time to measure it.
+   *
+   * Deliberately NOT fed into the ranking. Only a few moments are probed per
+   * poll, so ranking on it would be comparing moments that have the number
+   * against moments that merely have not been measured yet — which rewards
+   * being probed rather than being good. It becomes a ranking input when
+   * coverage is complete and there is something to validate it against.
+   *
+   * Nor does it overwrite the cut point. The measurement that matters for
+   * placement is the one taken over the real cut downstream, where the window
+   * is wider and the burst can be centred properly; a 70s guess from here
+   * would replace a careful number with a rough one.
+   */
+  async measureAudio(moments) {
+    if (!config.audioProbe) return 0;
+
+    // Remember only what is still on the feed, so the map cannot grow for the
+    // length of the broadcast.
+    const live = new Set(moments.map((moment) => moment.id));
+    for (const id of this.audioByMoment.keys()) {
+      if (!live.has(id)) this.audioByMoment.delete(id);
+    }
+
+    let probed = 0;
+    for (const moment of moments) {
+      if (this.audioByMoment.has(moment.id)) {
+        const known = this.audioByMoment.get(moment.id);
+        if (known) Object.assign(moment, known);
+        continue;
+      }
+      if (probed >= config.audioProbePerPoll) continue;
+      if (!moment.vodId || !Number.isFinite(moment.offsetSeconds)) continue;
+
+      probed += 1;
+      // Sequential: concurrent yt-dlp and ffmpeg pairs are what stopped this
+      // machine creating processes at all.
+      const result = await this.probe({
+        vodId: moment.vodId,
+        offsetSeconds: moment.offsetSeconds,
+        before: config.audioProbeBefore,
+        after: config.audioProbeAfter,
+        log: this.log,
+      });
+
+      if (!result.ok || !result.peak) {
+        this.audioByMoment.set(moment.id, null);
+        continue;
+      }
+
+      const measured = {
+        audioBurst: result.peak.burst,
+        audioZ: result.peak.z,
+        audioOffsetSeconds: result.peak.at,
+      };
+      this.audioByMoment.set(moment.id, measured);
+      Object.assign(moment, measured);
+    }
+
+    return probed;
   }
 
   /**

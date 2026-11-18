@@ -95,9 +95,16 @@ export function peakOf(samples, { windowStart = 0, chatOffset = null } = {}) {
   for (const sample of samples) if (sample.m > peak.m) peak = sample;
 
   const at = windowStart + peak.t;
+  // Peak over median, in dB. This is deliberately the same quantity
+  // engagement.js calls `burst` and scores against (>= 9 reads as a real
+  // burst, < 4 as none), so a number produced here means what a number
+  // produced there means and the two can be compared without conversion.
+  const burst = Math.round((peak.m - stats.median) * 10) / 10;
+
   return {
     at: Math.round(at * 10) / 10,
     loudness: Math.round(peak.m * 10) / 10,
+    burst,
     z: scale ? Math.round(((peak.m - stats.median) / scale) * 100) / 100 : null,
     median: Math.round(stats.median * 10) / 10,
     mad: Math.round(stats.mad * 100) / 100,

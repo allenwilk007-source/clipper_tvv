@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'node:test';
 
+import { config } from './config.js';
 import { Feed } from './feed.js';
 
 /**
@@ -299,5 +300,114 @@ describe('the full feed with credentials', () => {
     assert.equal(feed.game.name, 'Grand Theft Auto VI + Fortnite');
     const byChannel = Object.fromEntries(feed.moments.map((m) => [m.broadcaster, m.game]));
     assert.deepEqual(byChannel, { clix: 'Fortnite', lirik: 'Grand Theft Auto VI' });
+  });
+});
+
+describe('audio measurement', () => {
+  const reading = (overrides = {}) => ({
+    ok: true,
+    peak: { at: 1234.5, burst: 11.2, z: 3.1, loudness: -18.4, median: -29.6, ...overrides },
+  });
+
+  // measureAudio needs neither chat nor Helix, so the feed is built bare and
+  // the method called directly.
+  const feedWith = (probe) => new Feed({ log: () => {}, chat: null, store: null, probe });
+
+  it('attaches the burst in the units the downstream meter already uses', async () => {
+    const feed = feedWith(async () => reading());
+    const moments = [{ id: 'm1', vodId: '999', offsetSeconds: 1200 }];
+
+    await feed.measureAudio(moments);
+
+    assert.equal(moments[0].audioBurst, 11.2);
+    assert.equal(moments[0].audioZ, 3.1);
+    assert.equal(moments[0].audioOffsetSeconds, 1234.5);
+  });
+
+  it('leaves the cut point alone', async () => {
+    // The placement measurement that counts is taken over the real cut
+    // downstream, where the window is wider and the burst can be centred.
+    // Overwriting from here would swap a careful number for a rough one.
+    const feed = feedWith(async () => reading());
+    const moments = [{ id: 'm1', vodId: '999', offsetSeconds: 1200, reactionOffsetSeconds: 1198 }];
+
+    await feed.measureAudio(moments);
+
+    assert.equal(moments[0].reactionOffsetSeconds, 1198);
+    assert.equal(moments[0].offsetSeconds, 1200);
+  });
+
+  it('never probes the same moment twice', async () => {
+    let calls = 0;
+    const feed = feedWith(async () => {
+      calls += 1;
+      return reading();
+    });
+    const moments = [{ id: 'm1', vodId: '999', offsetSeconds: 1200 }];
+
+    await feed.measureAudio(moments);
+    await feed.measureAudio(moments);
+    await feed.measureAudio(moments);
+
+    assert.equal(calls, 1);
+    // The remembered reading is still reapplied on later polls.
+    assert.equal(moments[0].audioBurst, 11.2);
+  });
+
+  it('caps how many it probes in one poll', async () => {
+    let calls = 0;
+    const feed = feedWith(async () => {
+      calls += 1;
+      return reading();
+    });
+    const moments = Array.from({ length: 10 }, (_, i) => ({
+      id: `m${i}`,
+      vodId: '999',
+      offsetSeconds: 1000 + i * 200,
+    }));
+
+    const probed = await feed.measureAudio(moments);
+
+    assert.equal(probed, config.audioProbePerPoll);
+    assert.equal(calls, config.audioProbePerPoll);
+  });
+
+  it('skips a moment with nowhere to look', async () => {
+    let calls = 0;
+    const feed = feedWith(async () => {
+      calls += 1;
+      return reading();
+    });
+
+    // Live but not recording is common: subscriber-only VODs, and channels
+    // whose newest archive is days old.
+    await feed.measureAudio([{ id: 'm1', vodId: null, offsetSeconds: 1200 }]);
+
+    assert.equal(calls, 0);
+  });
+
+  it('remembers a failure so a dead VOD is not retried every poll', async () => {
+    let calls = 0;
+    const feed = feedWith(async () => {
+      calls += 1;
+      return { ok: false, reason: 'nothing downloaded' };
+    });
+    const moments = [{ id: 'm1', vodId: '999', offsetSeconds: 1200 }];
+
+    await feed.measureAudio(moments);
+    await feed.measureAudio(moments);
+
+    assert.equal(calls, 1);
+    assert.equal('audioBurst' in moments[0], false);
+  });
+
+  it('forgets moments that have left the feed', async () => {
+    const feed = feedWith(async () => reading());
+
+    await feed.measureAudio([{ id: 'm1', vodId: '999', offsetSeconds: 1200 }]);
+    assert.equal(feed.audioByMoment.size, 1);
+
+    await feed.measureAudio([{ id: 'm2', vodId: '999', offsetSeconds: 5000 }]);
+    assert.equal(feed.audioByMoment.has('m1'), false);
   });
 });

@@ -133,6 +133,15 @@ export const config = {
   watchChannels: logins(process.env.WATCH_CHANNELS, DEFAULT_WATCH),
   chatPollSeconds: num(process.env.CHAT_POLL_SECONDS, 10),
 
+  // Audio probe. Each probe is a yt-dlp and an ffmpeg, so it is capped per
+  // poll and every moment is probed at most once. The window leans backwards
+  // because chat is late: the event is usually behind the nominated offset,
+  // not ahead of it.
+  audioProbe: process.env.AUDIO_PROBE !== 'false',
+  audioProbePerPoll: num(process.env.AUDIO_PROBE_PER_POLL, 3),
+  audioProbeBefore: num(process.env.AUDIO_PROBE_BEFORE, 45),
+  audioProbeAfter: num(process.env.AUDIO_PROBE_AFTER, 25),
+
   // Persistence. The point is not durability, it's having a label to score
   // the ranking against later — see store.js and eval.js.
   storeEnabled: process.env.STORE_ENABLED !== 'false',
