@@ -150,9 +150,13 @@ export function selectForAutoclip(moments, { now = Date.now(), cuts = [], cfg = 
     const takenRecently = [...recent, ...picks.map((pick) => toCut(pick, now))];
 
     if (channels.size && !channels.has(momentLogin(moment))) skip('not-automated');
+    // Before the game rules: a channel with no recording has no chapters
+    // either, and counting that as an unreadable game made a quiet stretch of
+    // subscriber-only channels look like a broken collector. "unknown-game"
+    // now means only a recording whose game could not be read.
+    else if (!moment.vodId) skip('no-vod');
     else if (games.size && !moment.game) skip('unknown-game');
     else if (games.size && !games.has(who(moment.game))) skip('other-game');
-    else if (!moment.vodId) skip('no-vod');
     else if (offset == null) skip('no-offset');
     else if (!cfg.states.includes(moment.state)) skip('state');
     else if ((moment.opportunity ?? 0) < cfg.minScore) skip('score');
