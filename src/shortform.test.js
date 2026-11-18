@@ -24,6 +24,11 @@ import {
   pickQuote,
   postPartsFor,
   postTextFor,
+  describe,
+  youtubeTitle,
+  YOUTUBE_TITLE_MAX,
+  reactionFromEmoji,
+  quoteIn,
   shortformArgs,
   subtitleChunks,
   titleFor,
@@ -158,8 +163,104 @@ test('the post copy links straight to the moment in the full stream', () => {
   assert.equal(parts.credit, 'Credit: Sodapoppin on Twitch');
   assert.equal(parts.game, 'Fortnite');
   const lines = postTextFor(moment, { caption: 'he is cooked 💀', start: 3955 }).split('\n');
-  assert.equal(lines[0], 'he is cooked 💀');
+  assert.equal(lines[0], 'TIKTOK');
+  // Attribution once, at the bottom, not in every block.
+  assert.equal(lines.filter((l) => l === 'Credit: Sodapoppin on Twitch').length, 1);
   assert.ok(lines.includes('Full stream: https://www.twitch.tv/videos/2932490378?t=1h05m55s'));
+});
+
+const LIRIK = {
+  id: 'chat:lirik:1',
+  source: 'chat',
+  broadcaster: 'lirik',
+  vodId: '2932444934',
+  game: 'Grand Theft Auto VI',
+  chat: { classes: { funny: { z: 5 } } },
+};
+
+test('each platform gets its own block, saying what the clip is about', () => {
+  const parts = postPartsFor(LIRIK, { caption: '"Excuse me, put that down" 😂', start: 15409 });
+  const { tiktok, instagram, youtube } = parts.platforms;
+  // What happens, not only the line of dialogue.
+  assert.match(parts.about, /lirik/i);
+  assert.match(parts.about, /GTA 6/);
+  assert.ok(!parts.about.includes('put that down'));
+  // TikTok: the hook first, lower case, tags inline at the end.
+  assert.ok(tiktok.startsWith('"excuse me, put that down" 😂 '));
+  assert.ok(tiktok.endsWith('#gta6 #gtavi #lirik #twitch #gaming'));
+  // Instagram: front-loaded first line, tags after a line break.
+  const [hook, credit, tags] = instagram.split('\n');
+  assert.ok(hook.length <= 125);
+  assert.ok(hook.includes(parts.about) && hook.includes('put that down'));
+  assert.equal(credit, 'Credit: lirik on Twitch');
+  assert.equal(tags, '#gta6 #gtavi #lirik #gaming #twitch #reels');
+  // YouTube: Title Case, #Shorts and the game's tag in the title.
+  const title = youtube.split('\n')[0];
+  assert.match(title, /^[A-Z].* #Shorts #GTA6 #lirik$/);
+  // Three different openings, not one sentence three times.
+  const openings = [tiktok, hook, title].map((t) => t.toLowerCase().slice(0, 30));
+  assert.equal(new Set(openings).size, 3);
+});
+
+test("tags follow the clip's own game, and an unknown game gets none", () => {
+  const fortnite = postPartsFor({ ...LIRIK, game: 'Fortnite' }, { caption: 'x 😂' }).platforms;
+  assert.match(fortnite.tiktok, /#fortnite /);
+  assert.ok(!/#gta/i.test(Object.values(fortnite).join(' ')));
+  assert.match(fortnite.youtube.split('\n')[0], /#Shorts #Fortnite/);
+  // The bug this must never bring back: a VALORANT clip tagged #gta6.
+  for (const game of ['VALORANT', null, '']) {
+    const all = Object.values(postPartsFor({ ...LIRIK, game }, { caption: 'x 😂' }).platforms).join(' ');
+    assert.ok(!/#gta|#fortnite/i.test(all), `${game}: ${all}`);
+    assert.match(all, /#lirik/);
+  }
+  // And with no game, the description does not name one.
+  assert.ok(!/GTA|Fortnite/.test(postPartsFor({ ...LIRIK, game: null }, { caption: 'x' }).about));
+});
+
+test('a YouTube title never passes 100 characters, and keeps #Shorts', () => {
+  for (const broadcaster of ['x', 'averyveryveryverylongstreamername_official', 'a'.repeat(25)]) {
+    for (const about of [
+      'short',
+      'He crashes the plane into the bridge',
+      'An enormously long description of what happened that goes on and on well past anything a title should hold in it',
+      'Word'.repeat(60),
+    ]) {
+      const title = youtubeTitle(about, { broadcaster, game: 'Grand Theft Auto VI' });
+      assert.ok(title.length <= YOUTUBE_TITLE_MAX, `${title.length}: ${title}`);
+      assert.match(title, /#Shorts #GTA6/);
+    }
+  }
+  // The creator's tag goes when it would not fit; #Shorts never does.
+  const long = youtubeTitle('Things get tense for averyveryveryverylongstreamername_official in GTA 6 again and again', {
+    broadcaster: 'averyveryveryverylongstreamername_official',
+    game: 'Grand Theft Auto VI',
+  });
+  assert.ok(long.endsWith(' #Shorts #GTA6'));
+  assert.ok(!long.includes('#averyvery'));
+});
+
+test('descriptions in the avoid list are not repeated', () => {
+  const first = describe(LIRIK);
+  const second = describe(LIRIK, { avoid: [first] });
+  assert.notEqual(second, first);
+  // A clip title a person wrote is what happens, and is used as it stands.
+  assert.equal(describe({ ...LIRIK, source: 'clip', title: 'he steals the cop car' }), 'He steals the cop car');
+  // A stream title is not.
+  assert.notEqual(describe({ ...LIRIK, source: 'clip', title: 'DAY 3 | !drops' }), 'DAY 3 | !drops');
+});
+
+test("older shorts: the reaction is read back from the title's emoji", () => {
+  assert.equal(reactionFromEmoji('"Put that down" 😂'), 'funny');
+  assert.equal(reactionFromEmoji('Wait what 😱'), 'shock');
+  // 👀 and 🔥 are also the neutral pair: no claim made.
+  assert.equal(reactionFromEmoji('IlloJuan: 🔥'), null);
+  // The hook's own words say it, emoji or not.
+  assert.equal(reactionFromEmoji("Let's go 🔥"), 'hype');
+  assert.equal(reactionFromEmoji('Chat lost it'), 'funny');
+  assert.equal(reactionFromEmoji("papaplatte: chat's chat could not breathe 🤣"), 'funny');
+  assert.equal(reactionFromEmoji('Doble in Fortnite 👀'), null);
+  assert.equal(quoteIn('"Put that down" 😂'), 'Put that down');
+  assert.equal(quoteIn('lirik broke chat 💀'), null);
 });
 
 test('the credit shows the name and nothing the font cannot draw', () => {

@@ -29,7 +29,7 @@
 import { copyFile, mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 
-import { GAME_HASHTAGS, config } from './config.js';
+import { GAME_HASHTAGS, GAME_TAGS, config } from './config.js';
 import { formatClipTimestamp, run, splitCommand, verticalFilter } from './clip.js';
 import { validateShort } from './validate.js';
 
@@ -349,33 +349,247 @@ export function hashtagsFor(moment, { hashtags = null } = {}) {
   return [base, login ? `#${login}` : ''].filter(Boolean).join(' ');
 }
 
+// ---------------------------------------------------------------------------
+// What the clip is about, and each platform's post
+// ---------------------------------------------------------------------------
+
 /**
- * Everything a post needs, in pieces, so each platform's button can put them
- * in the order that platform wants.
+ * What a moment is about, as a sentence a scrolling viewer can read — what
+ * happened, not a line of dialogue.
+ *
+ * Nothing here watches the video, so it says only what is known: a clip
+ * title a person wrote about this moment is used as it stands (that is
+ * someone saying what happens); otherwise who, in which game, and what chat
+ * did, from the reaction class that spiked. Each class has several, and
+ * anything in `avoid` is skipped, so a busy hour does not repeat itself.
  */
-export function postPartsFor(moment, { caption, start, hashtags = null } = {}) {
+const ABOUT = {
+  clipit: ["The {game} moment {name}'s chat had to clip", "{name}'s chat would not stop spamming clip it in {game}"],
+  funny: ['{name} has chat in tears in {game}', "{name}'s {game} stream turns into a comedy", 'Chat cannot stop laughing at {name} in {game}'],
+  shock: ['{name} did not see this coming in {game}', "Nobody was ready for this on {name}'s {game} stream", "Chat can't believe what happened to {name} in {game}"],
+  hype: ['Chat goes wild for {name} in {game}', '{name} gets chat hyped in {game}', '{name} sets chat off in {game}'],
+  tension: ['Things get tense for {name} in {game}', 'Chat holds its breath with {name} in {game}'],
+  // No clear reaction: what is known is that chat spiked here, so say that.
+  neutral: ["The {game} moment {name}'s chat jumped on", "{name}'s chat spiked at this {game} moment", "What set off {name}'s chat in {game}"],
+};
+
+const gameInfo = (game) => GAME_TAGS[String(game || '').toLowerCase()] || null;
+
+/** The game as a title says it ("GTA 6"), or null when it is not known. */
+export function gameLabel(game) {
+  const info = gameInfo(game);
+  if (info) return info.short;
+  const text = cleanCaption(game);
+  return text || null;
+}
+
+function fill(template, name, game) {
+  let text = template.replace(/\{name\}/g, name);
+  // No game known: say nothing about one rather than guess.
+  text = game
+    ? text.replace(/\{game\}/g, game)
+    : text.replace(/ in \{game\}/g, '').replace(/\{game\} /g, '').replace(/\{game\}/g, '');
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** A clip title a person wrote about this moment, cleaned up, or null. */
+export function writtenTitle(moment, { mild = true } = {}) {
+  const raw = String(moment?.title || '');
+  if (moment?.source === 'chat' || !raw || STREAM_TITLE.test(raw)) return null;
+  const written = cleanCaption(raw)
+    .replace(new RegExp(EMOJI.source, 'gu'), '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (written.split(/\s+/).length < 2) return null;
+  const text = censor(written, { mild });
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+export function describe(moment, { avoid = [], mild = true, reaction: given } = {}) {
+  const taken = new Set([...avoid].map(sameTitle));
+  const written = writtenTitle(moment, { mild });
+  if (written && !taken.has(sameTitle(written))) return written;
+  // Post copy, not drawn on the video: the name as it is, underscores and all.
+  const name = String(moment?.broadcaster || '').replace(/\s+/g, ' ').trim() || 'This streamer';
+  const game = gameLabel(moment?.game);
+  const reaction = given || dominantReaction(moment?.chat) || 'neutral';
+  const templates = ABOUT[reaction] || ABOUT.neutral;
+  const seed = hashOf(moment?.id || moment?.broadcaster || '');
+  const options = templates.map((_, i) => fill(templates[(seed + i) % templates.length], name, game));
+  return options.find((text) => !taken.has(sameTitle(text))) || options[0];
+}
+
+const hookPattern = (hook) =>
+  new RegExp(
+    `^(?:.+: )?${hook
+      .replace(/[.*+?^$()|[\]\\]/g, '\\$&')
+      .replace(/\{name\}/g, '.+')
+      .replace(/\{game\}/g, '.+')}$`,
+    'i',
+  );
+
+/**
+ * Which reaction a finished title came from, for shorts made before
+ * descriptions: from one of the reaction hooks it was built from, else its
+ * emoji. 👀 and 🔥 are also the neutral pair, so on their own they say nothing.
+ */
+export function reactionFromEmoji(caption) {
+  const text = String(caption || '')
+    .replace(new RegExp(EMOJI.source, 'gu'), '')
+    .replace(/[\u200d\ufe0f]/g, '')
+    .trim();
+  for (const [name, { hooks }] of Object.entries(REACTIONS)) {
+    if (hooks.some((hook) => hookPattern(hook.replace('{name}', 'chat')).test(text) || hookPattern(hook).test(text))) return name;
+  }
+  const emoji = [...String(caption || '')].filter((c) => EMOJI.test(c)).at(-1);
+  if (!emoji || NEUTRAL.emoji.includes(emoji)) return null;
+  return Object.keys(REACTIONS).find((name) => REACTIONS[name].emoji.includes(emoji)) || null;
+}
+
+/** The streamer's line inside a title like `"Put that down" 😂`, or null. */
+export const quoteIn = (caption) => /^"(.+)"/.exec(String(caption || '').trim())?.[1] || null;
+
+const creatorTag = (moment) => {
+  const login = String(moment?.broadcaster || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, '');
+  return login ? `#${login}` : '';
+};
+
+/** Cut at a word boundary to fit, with an ellipsis when anything was cut. */
+export function fitText(text, max) {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  if (clean.length <= max) return clean;
+  const room = clean.slice(0, Math.max(0, max - 1));
+  const space = room.lastIndexOf(' ');
+  return `${(space > max * 0.5 ? room.slice(0, space) : room).replace(/[\s,;:.\-–—]+$/, '')}…`;
+}
+
+const SMALL = new Set('a an and as at but by for in of on or the to vs with'.split(' '));
+
+/** Title Case for a YouTube title, leaving words already capitalised alone (GTA). */
+export function titleCase(text) {
+  const words = String(text || '').split(' ');
+  return words
+    .map((word, i) => {
+      if (!/^[a-z]/.test(word)) return word;
+      // Small words stay small, except first and last.
+      if (i > 0 && i < words.length - 1 && SMALL.has(word)) return word;
+      return word.charAt(0).toUpperCase() + word.slice(1);
+    })
+    .join(' ');
+}
+
+// YouTube cuts a title at 100 characters, silently. Counted in UTF-16 units,
+// which is never fewer than YouTube's own count, so it never overflows.
+export const YOUTUBE_TITLE_MAX = 100;
+export const TIKTOK_HOOK_MAX = 80;
+export const INSTAGRAM_HOOK_MAX = 125;
+
+/**
+ * The YouTube title: what happens, Title Case, then #Shorts and the game's
+ * tag, all inside 100 characters. The creator's tag goes in only if it fits;
+ * the description is shortened before #Shorts is ever dropped.
+ */
+export function youtubeTitle(about, moment) {
+  const gameTag = gameInfo(moment?.game)?.youtube || '';
+  const full = ['#Shorts', gameTag, creatorTag(moment)].filter(Boolean).join(' ');
+  const short = ['#Shorts', gameTag].filter(Boolean).join(' ');
+  const text = titleCase(
+    String(about || '')
+      .replace(new RegExp(EMOJI.source, 'gu'), '')
+      .replace(/\s+/g, ' ')
+      .trim(),
+  );
+  for (const tags of [full, short]) {
+    if (text.length + 1 + tags.length <= YOUTUBE_TITLE_MAX) return `${text} ${tags}`;
+  }
+  return `${fitText(text, YOUTUBE_TITLE_MAX - short.length - 1)} ${short}`;
+}
+
+/**
+ * Everything a post needs: the pieces, and each platform's version ready to
+ * paste. Tags follow the clip's own game; with no readable game there is no
+ * game tag at all. Credit and the stream link are attribution, said once.
+ *
+ * The three lead differently so they are not one sentence three times:
+ * TikTok with the hook (the streamer's line when there is one), Instagram
+ * with what happens and the line after it, YouTube with what happens.
+ */
+export function postPartsFor(
+  moment,
+  { caption, start, hashtags = null, about = null, quote = null, avoid = [], mild = true, reaction: given = null } = {},
+) {
   const who = String(moment?.broadcaster || '').trim();
   const vod = String(moment?.vodId || '').replace(/^v/, '');
+  const title = caption || captionFor(moment);
+  const line = quote ?? quoteIn(title);
+  const what = about || describe(moment, { avoid, mild, reaction: given });
+  // YouTube opens with a second wording, so its title is not the Instagram
+  // line again — unless a person wrote what happens, which beats either.
+  const written = writtenTitle(moment, { mild });
+  const youtubeAbout = written && sameTitle(written) === sameTitle(what) ? what : describe(moment, { avoid: [...avoid, what], mild, reaction: given });
+  const reaction = REACTIONS[dominantReaction(moment?.chat)] || null;
+  const emoji = [...title].filter((c) => EMOJI.test(c)).at(-1) || reaction?.emoji[0] || '';
+
+  // A configured override replaces the game's tags; the creator's is always added.
+  const gameTags = hashtags ? hashtags.split(/\s+/).filter(Boolean) : gameInfo(moment?.game)?.tags || [];
+  const creator = creatorTag(moment);
+  const tagsFor = (...extra) => [...new Set([...gameTags, creator, ...extra].filter(Boolean))].join(' ');
+
+  const tiktokHook = fitText(`${line ? `"${line}"` : what} ${emoji}`.trim().toLowerCase(), TIKTOK_HOOK_MAX);
+  const instaHook = fitText(`${what}${line ? ` — "${line}"` : ''} ${emoji}`.trim(), INSTAGRAM_HOOK_MAX);
+  const credit = who ? `Credit: ${who} on Twitch` : '';
+  const link = vod ? `https://www.twitch.tv/videos/${vod}?t=${twitchTime(start)}` : '';
+
   return {
-    caption: caption || captionFor(moment),
-    credit: who ? `Credit: ${who} on Twitch` : '',
-    link: vod ? `https://www.twitch.tv/videos/${vod}?t=${twitchTime(start)}` : '',
+    caption: title,
+    about: what,
+    credit,
+    link,
     tags: hashtagsFor(moment, { hashtags }),
     game: moment?.game || null,
     broadcaster: who || null,
+    platforms: {
+      tiktok: `${tiktokHook} ${tagsFor('#twitch', '#gaming')}`,
+      instagram: [instaHook, credit, tagsFor('#gaming', '#twitch', '#reels')].filter(Boolean).join('\n'),
+      youtube: [
+        youtubeTitle(youtubeAbout, moment),
+        '',
+        line ? `"${line}"` : null,
+        credit || null,
+        link ? `Full stream: ${link}` : null,
+        '',
+        tagsFor('#twitch', '#gaming', '#shorts'),
+      ]
+        .filter((l) => l !== null)
+        .join('\n')
+        .replace(/\n{3,}/g, '\n\n'),
+    },
   };
 }
 
-/** The plain-text post copy written beside each short. */
+/**
+ * The plain-text post copy written beside each short: one labelled block per
+ * platform to copy from, then the credit and stream link once.
+ */
 export function postTextFor(moment, options = {}) {
-  const parts = postPartsFor(moment, options);
+  const parts = options.parts || postPartsFor(moment, options);
   return [
-    parts.caption,
+    'TIKTOK',
+    parts.platforms.tiktok,
+    '',
+    'INSTAGRAM',
+    parts.platforms.instagram
+      .split('\n')
+      .filter((l) => l !== parts.credit)
+      .join('\n'),
+    '',
+    'YOUTUBE',
+    parts.platforms.youtube.split('\n')[0],
     '',
     parts.credit || null,
     parts.link ? `Full stream: ${parts.link}` : null,
-    '',
-    parts.tags,
     '',
   ]
     .filter((line) => line !== null)
@@ -898,6 +1112,7 @@ export async function renderShort({
   }
 
   const caption = titleFor(moment, { words, reactionAt, avoid, mild: settings.censor });
+  const about = describe(moment, { avoid, mild: settings.censor });
   const chunks = words ? subtitleChunks(words, { mild: settings.censor }) : [];
   const layout = layoutFor({
     style: settings.style,
@@ -978,9 +1193,9 @@ export async function renderShort({
     // The post copy, as plain text to read and as parts for the panel's
     // platform buttons, written before the video moves so the panel never
     // sees a short without its copy.
-    const parts = postPartsFor(moment, { caption, start, hashtags: settings.hashtags });
+    const parts = postPartsFor(moment, { caption, start, about, hashtags: settings.hashtags, mild: settings.censor });
     const textPath = join(dirname(output), `${stem}.txt`);
-    await writeFile(join(workDir, `${stem}.rendering.txt`), postTextFor(moment, { caption, start, hashtags: settings.hashtags }), 'utf8');
+    await writeFile(join(workDir, `${stem}.rendering.txt`), postTextFor(moment, { parts }), 'utf8');
     await writeFile(join(workDir, `${stem}.rendering.json`), `${JSON.stringify(parts, null, 2)}\n`, 'utf8');
     await moveInto(join(workDir, `${stem}.rendering.txt`), textPath);
     await moveInto(join(workDir, `${stem}.rendering.json`), join(dirname(output), `${stem}.json`));
@@ -990,6 +1205,7 @@ export async function renderShort({
       path: output,
       textPath,
       caption,
+      description: about,
       words: words ? words.length : null,
       speechError,
       track: track ? basename(track.path) : null,

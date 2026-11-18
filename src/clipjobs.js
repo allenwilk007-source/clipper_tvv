@@ -283,6 +283,7 @@ async function runJob(job) {
     job.shortPath = made.path;
     job.textPath = made.textPath;
     job.caption = made.caption;
+    job.description = made.description || null;
     job.words = made.words;
     job.speechError = made.speechError;
     job.track = made.track;

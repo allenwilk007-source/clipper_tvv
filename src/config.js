@@ -96,6 +96,16 @@ function games() {
 
 // Post-copy tags by game, keyed lowercase. SHORTS_HASHTAGS, when set,
 // replaces these for every game.
+/**
+ * Each game's own tags, and how a title names it. Only a game the clip was
+ * actually recorded in gets its tags: a game that cannot be read gets none,
+ * never a default.
+ */
+export const GAME_TAGS = {
+  'grand theft auto vi': { tags: ['#gta6', '#gtavi'], youtube: '#GTA6', short: 'GTA 6' },
+  fortnite: { tags: ['#fortnite', '#fortniteclips'], youtube: '#Fortnite', short: 'Fortnite' },
+};
+
 export const GAME_HASHTAGS = {
   'grand theft auto vi': '#gta6 #gtavi #gaming #twitch',
   fortnite: '#fortnite #fortniteclips #gaming #twitch',

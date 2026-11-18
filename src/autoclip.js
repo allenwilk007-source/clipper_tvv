@@ -344,7 +344,11 @@ export class AutoClipper {
   settled(moment, job) {
     const ok = job.state === 'done';
     this.totals[ok ? 'done' : 'failed'] += 1;
-    if (ok) this.rememberCaption(job.caption);
+    if (ok) {
+      this.rememberCaption(job.caption);
+      // The description too, so the next one about this channel reads differently.
+      if (job.description) this.rememberCaption(job.description);
+    }
     // No subtitles is a degraded short, not a failed one — but worth saying.
     if (ok && job.speechError) this.log(`autocollect: no subtitles for ${moment.broadcaster}: ${job.speechError}`);
     try {

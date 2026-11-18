@@ -315,6 +315,28 @@ started partway in, at about -18 dB under the stream, ducking further whenever
 someone talks, with a fade in and out. Use music you have the right to post:
 copyrighted songs get shorts muted or struck.
 
+### Post copy: one block per platform
+
+Beside each short, its `.txt` holds a TikTok, an Instagram and a YouTube
+version, labelled, then the credit and the stream link once. The platform
+buttons in the page copy the right one.
+
+- **What it is about, not just what was said.** Nothing watches the video,
+  so the description says what is known: a clip title a person wrote about
+  the moment, used as it stands; otherwise who, the game, and what chat did.
+  The streamer's own line stays as the hook.
+- **TikTok** leads with the hook, lower case, 80 characters, tags inline.
+  **Instagram** front-loads the first 125 characters, tags after a line break.
+  **YouTube** is a Title Case title with `#Shorts` and the game's tag, never
+  over 100 characters: the description is shortened, and the creator's tag
+  dropped, before `#Shorts` is.
+- **Tags follow the clip's own game**: `#gta6 #gtavi` or `#fortnite`, plus
+  `#<creator>`. A clip whose game can't be read gets no game tag at all.
+- `npm run recopy` rewrites the copy of every short already in `clips/ready`
+  in this format, from what each one recorded about itself. Videos and
+  `clips/rejected` are not touched; a short whose copy can't be rebuilt keeps
+  its old one.
+
 ### Posting
 
 Each finished short in the panel has **TikTok**, **YouTube** and **Instagram**

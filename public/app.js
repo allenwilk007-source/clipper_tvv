@@ -465,10 +465,13 @@ const joinLines = (lines) =>
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 
+// Shorts made since the per-platform copy existed carry each platform's text
+// ready-made (p.platforms); older ones are assembled from their pieces.
 const PLATFORMS = {
   tiktok: {
-    url: 'https://www.tiktok.com/upload',
-    text: (p) => joinLines([p.caption, '', p.credit, '', p.tags]),
+    // tiktok.com/upload now bounces to the home page; Studio's upload holds.
+    url: 'https://www.tiktok.com/tiktokstudio/upload',
+    text: (p) => p.platforms?.tiktok || joinLines([p.caption, '', p.credit, '', p.tags]),
     hint: 'Caption copied and TikTok upload opened. Drag the selected file in, paste, post.',
   },
   youtube: {
@@ -476,6 +479,7 @@ const PLATFORMS = {
     // First line is the title (YouTube allows 100 characters), the rest the
     // description. #Shorts in the title is what files a vertical video there.
     text: (p) =>
+      p.platforms?.youtube ||
       joinLines([
         `${p.caption} #Shorts`.slice(0, 100),
         '',
@@ -487,8 +491,11 @@ const PLATFORMS = {
     hint: 'Copied and YouTube upload opened. The first line is the title, the rest the description.',
   },
   instagram: {
+    // The home page on purpose. instagram.com/create/... looks like the upload
+    // page but Instagram routes it as a USERNAME: it opens a stranger's
+    // profile (@create). There is no direct upload URL; click Create.
     url: 'https://www.instagram.com/',
-    text: (p) => joinLines([p.caption, '', p.credit, '', p.tags]),
+    text: (p) => p.platforms?.instagram || joinLines([p.caption, '', p.credit, '', p.tags]),
     hint: 'Caption copied and Instagram opened. Click Create, pick the selected file, paste.',
   },
 };
