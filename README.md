@@ -415,14 +415,52 @@ Windows and cut one lirik moment twice. The store refuses a second claim on
 the same moment too: anything within 45 seconds on the same recording,
 under any id, from any copy.
 
-### Channels with no recording
+### Channels with no recording: recording them live
 
 A channel can be live with nothing to cut: Twitch publishes some streams as a
-recording only afterwards, or not at all. ishowspeed, live during testing,
-had a newest archive from days earlier, so it showed **not recording** and
-none of his moments could be cut. Cutting "today's offset" into that old VOD
-would have been a random clip from another day. Clipping such channels would
-need recording the live stream itself, which is not built.
+recording only afterwards, or not at all. ishowspeed keeps no live archive;
+squeezie, zerator and wankilstudio keep theirs for subscribers only. Cutting
+"today's offset" into an old VOD would be a random clip from another day, so
+these channels are recorded from the live stream instead (`src/live.js`).
+
+- **Which channels.** Every few seconds one automated channel's public page is
+  checked (each at most every three minutes): live, in a clipped game, and
+  with no VOD that can be cut. Those are recorded, the biggest first, up to
+  `RECORD_MAX` at once (4). A channel whose VOD status can't be told yet is
+  not recorded on a guess; the next pass asks again.
+- **What is kept.** The last `RECORD_KEEP_SECONDS` (10 minutes) of the stream
+  at up to `RECORD_QUALITY` (720p), as Twitch's own 2-second segments under
+  `clips/.live/`. Older segments are deleted as new ones arrive, so the disk
+  use stays flat. Each 720p recording is a few megabits a second of download.
+- **Ads are not recorded.** Joining a stream stitches in a 30-second pre-roll
+  ad, and mid-rolls arrive the same way. Twitch marks them, and they are
+  skipped. One session is kept open per channel, since every new one starts
+  with another pre-roll. While a streamer runs an ad break, the stream itself
+  is replaced by ads for viewers like this one, so nothing is recorded and a
+  moment in that stretch cannot be cut: the recording has a gap there, and no
+  cut is ever made across a gap.
+- **Two stream formats.** Some channels are served as MPEG-TS, some as
+  fragmented MP4 (zerator and evelone2004 were). Fragments are stored with
+  their init segment, and joined into one continuous file before a cut, so
+  both come out the same.
+- **Lining a moment up.** Every segment carries the wall-clock time it was
+  broadcast, so a chat spike is matched to the exact seconds of video around
+  it — the same 25-before, 5-after window as a VOD cut. A moment waits
+  (`settling`) until the recording holds that whole window, and a cut is never
+  made across a gap, such as a mid-roll.
+- **Claiming.** When a moment is picked, its stretch of the recording (55s
+  before to 15s after) is copied out of the rolling buffer, so a job that waits
+  in the queue cannot lose it, and a redo can still widen the cut. After that
+  it is captioned, scored, checked and rendered exactly like a VOD cut. The copy
+  is deleted with the job's other intermediates.
+
+The panel shows these channels as **recording live** with a red dot, and the
+status line counts them. `RECORDING=off` turns it off.
+
+Verified on real streams: caseoh_ (MPEG-TS) and evelone2004 (fragmented MP4)
+each went from the live buffer to a finished, checked 30s short, camera on
+top and subtitled, through the same job pipeline as a VOD cut. Live moments
+share the hourly budget (`AUTOCLIP_PER_HOUR`) with everything else.
 
 ## Detection: being first, and proving it
 
@@ -651,6 +689,7 @@ src/shortform.js caption, 9:16 render with text, post copy
 src/autoclip.js which moments to cut, and cutting them
 src/automation.js channel automation: the panel's channels, switch, shorts
 src/archive.js  where a live channel is recording, and its game, without credentials
+src/live.js     recording a live stream with no VOD, and cutting from it
 src/transcribe.py speech to timed words (faster-whisper), for subtitles and titles
 src/facecam.py  where the streamer's webcam is in a clip (OpenCV YuNet)
 src/engagement.js the engagement meter, and choosing the window for a redo

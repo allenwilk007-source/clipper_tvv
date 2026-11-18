@@ -210,3 +210,31 @@ test('channels that simply do not record are not a fault', async () => {
   assert.equal(failing.level, 'warn');
   assert.match(failing.message, /no recording to cut from, and recording lookups are failing \(ETIMEDOUT\)/);
 });
+
+test('moments on a recorded channel are marked as cuttable from the recording', async () => {
+  const { annotateLive } = await import('./automation.js');
+  const peak = Date.parse('2026-11-18T21:10:00Z');
+  const recorders = {
+    get: (login) =>
+      login === 'ishowspeed'
+        ? { login, game: 'grand theft auto vi', covers: (from, to) => from >= peak - 30_000 && to <= peak + 10_000 }
+        : null,
+  };
+  const [live, vod, unrecorded] = annotateLive(
+    [
+      { id: 'chat:ishowspeed:1', broadcaster: 'ishowspeed', vodId: null, firstClipAt: new Date(peak).toISOString() },
+      { id: 'chat:lirik:1', broadcaster: 'lirik', vodId: '123', firstClipAt: new Date(peak).toISOString() },
+      { id: 'chat:caseoh_:1', broadcaster: 'caseoh_', vodId: null, firstClipAt: new Date(peak).toISOString() },
+    ],
+    recorders,
+    { pre: 25, post: 5 },
+  );
+  assert.deepEqual(live.live, { login: 'ishowspeed', peakAt: peak });
+  assert.equal(live.liveReady, true);
+  // No chapters without a VOD: the game comes from the channel's page.
+  assert.equal(live.game, 'grand theft auto vi');
+  assert.equal(live.reactionOffsetSeconds, Math.round(peak / 1000));
+  // A moment with a VOD keeps using it; one with neither is untouched.
+  assert.equal(vod.live, undefined);
+  assert.equal(unrecorded.live, undefined);
+});

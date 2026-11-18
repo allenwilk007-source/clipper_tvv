@@ -543,6 +543,7 @@ const shortCards = new Map();
 
 const CHANNEL_STATES = {
   recording: 'Recording: its moments can be cut',
+  'recording live': 'Recording the live stream: it has no VOD, so its moments are cut from the recording',
   'not recording': 'Not recording: its moments can be watched, not cut',
   listening: 'Listening for a moment',
   live: 'Live in the category',
@@ -605,6 +606,8 @@ function statusLine(view) {
   if (working) parts.push(`${working} rendering`);
   if (s.failed) parts.push(`${s.failed} failed`);
   parts.push(`${s.lastHour} of ${s.perHour} this hour`);
+  const live = view.recordings?.filter((r) => r.state === 'recording').length || 0;
+  if (live) parts.push(`recording ${live} live`);
   const note =
     view.mode === 'chat-only' ? ' · chat-only: a channel has to be recording to be cut' : '';
   return `On · ${parts.join(' · ')}${note}`;

@@ -152,6 +152,14 @@ export const config = {
   // moments/clips/outcomes history is kept regardless.
   storePruneDays: num(process.env.STORE_PRUNE_DAYS, 14),
 
+  // Live recording, for channels with no VOD to cut from (see live.js).
+  // Each recording is a 720p stream, about 3-5 Mbit/s down, with a rolling
+  // buffer of RECORD_KEEP_SECONDS on disk (roughly 300 MB at 10 minutes).
+  recording: process.env.RECORDING !== 'off',
+  recordMax: num(process.env.RECORD_MAX, 4),
+  recordKeepSeconds: num(process.env.RECORD_KEEP_SECONDS, 600),
+  recordQuality: num(process.env.RECORD_QUALITY, 720),
+
   // Local clip extraction. The window is lopsided on purpose: see clip.js.
   clipPre: num(process.env.CLIP_PRE, 25),
   clipPost: num(process.env.CLIP_POST, 5),

@@ -587,6 +587,24 @@ select {
   background: var(--early);
 }
 
+/* Recorded from the live stream: a red, pulsing dot, as on Twitch. */
+.channel.is-recording-live i {
+  background: var(--danger);
+  animation: rec-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes rec-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .channel.is-recording-live i {
+    animation: none;
+  }
+}
+
 .channel button {
   padding: 0 6px;
   border: 0;

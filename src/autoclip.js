@@ -119,9 +119,16 @@ export function momentLogin(moment) {
   return String(fromId || moment?.broadcaster || '').toLowerCase();
 }
 
+/**
+ * What a cut is cut from, as a key: the VOD id, or for a channel recorded
+ * live, the channel. Two moments within a few seconds on the same source are
+ * the same moment, whichever id they arrived under.
+ */
+export const sourceOf = (moment) => moment?.vodId || (moment?.live ? `live-${moment.live.login}` : null);
+
 export const toCut = (moment, at) => ({
   momentId: moment.id,
-  vodId: moment.vodId,
+  vodId: sourceOf(moment),
   offsetSeconds: cutOffset(moment),
   broadcaster: moment.broadcaster,
   at,
@@ -161,7 +168,10 @@ export function selectForAutoclip(moments, { now = Date.now(), cuts = [], cfg = 
     // either, and counting that as an unreadable game made a quiet stretch of
     // subscriber-only channels look like a broken collector. "unknown-game"
     // now means only a recording whose game could not be read.
-    else if (!moment.vodId) skip('no-vod');
+    // A channel recorded live has no VOD but can still be cut, once the
+    // recording holds the whole window.
+    else if (!moment.vodId && !moment.live) skip('no-vod');
+    else if (moment.live && !moment.liveReady) skip('settling');
     else if (games.size && !moment.game) skip('unknown-game');
     else if (games.size && !games.has(who(moment.game))) skip('other-game');
     else if (offset == null) skip('no-offset');
@@ -174,7 +184,7 @@ export function selectForAutoclip(moments, { now = Date.now(), cuts = [], cfg = 
       ids.has(moment.id) ||
       taken.some(
         (cut) =>
-          vodKey(cut.vodId) === vodKey(moment.vodId) &&
+          vodKey(cut.vodId) === vodKey(sourceOf(moment)) &&
           Math.abs(cut.offsetSeconds - offset) <= cfg.dedupeSeconds,
       )
     ) {
@@ -213,12 +223,16 @@ export class AutoClipper {
     enqueue = enqueueClip,
     now = () => Date.now(),
     cfg = autoclipConfig(),
+    // For a channel recorded live: copies the recording around a moment out
+    // of the rolling buffer, so a queued job cannot lose it.
+    snapshotLive = null,
   } = {}) {
     this.store = store;
     this.log = log;
     this.enqueue = enqueue;
     this.now = now;
     this.cfg = cfg;
+    this.snapshotLive = snapshotLive;
     this.cuts = [];
     this.totals = { queued: 0, done: 0, failed: 0 };
     this.lastSkipped = {};
@@ -265,10 +279,16 @@ export class AutoClipper {
     const { picks, skipped } = selectForAutoclip(moments, { now, cuts: this.cuts, cfg: this.cfg });
     this.lastSkipped = skipped;
     this.lastPicks = picks.length;
-    return picks.map((moment) => this.cut(moment, now)).filter(Boolean);
+    // One at a time: a live moment's claim copies its recording first.
+    const jobs = [];
+    for (const moment of picks) {
+      const job = await this.cut(moment, now);
+      if (job) jobs.push(job);
+    }
+    return jobs;
   }
 
-  cut(moment, now) {
+  async cut(moment, now) {
     // Provisional: the render replaces it with one about what was said.
     const caption = captionFor(moment, { avoid: this.recentCaptions });
     const cut = toCut(moment, now);
@@ -285,8 +305,25 @@ export class AutoClipper {
     this.cuts.push(cut);
     this.totals.queued += 1;
 
-    this.log(`autocollect: cutting ${moment.broadcaster} at ${cut.offsetSeconds}s — "${caption}"`);
+    // A live moment's recording is copied out now, while the buffer still
+    // holds it: the job may wait in the queue longer than the buffer keeps.
+    let live = null;
+    if (moment.live) {
+      try {
+        live = await this.snapshotLive(moment);
+      } catch (err) {
+        this.totals.failed += 1;
+        this.log(`autocollect: ${moment.broadcaster}'s recording could not be kept: ${err.message}`);
+        this.store?.finishAutoclip(moment.id, { status: 'failed', error: err.message });
+        return null;
+      }
+    }
+
+    this.log(
+      `autocollect: cutting ${moment.broadcaster} ${live ? '(live recording)' : `at ${cut.offsetSeconds}s`} — "${caption}"`,
+    );
     return this.enqueue({
+      live,
       vodId: moment.vodId,
       offsetSeconds: cut.offsetSeconds,
       ...(({ pre, post }) => ({ pre, post }))(windowFor(moment, this.cfg)),

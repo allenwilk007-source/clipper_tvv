@@ -347,3 +347,63 @@ test('a moment with no recording is "no-vod", not an unreadable game', () => {
   const { skipped } = select([moment({ vodId: null, game: null })], [], { games: ['Grand Theft Auto VI'] });
   assert.deepEqual(skipped, { 'no-vod': 1 });
 });
+
+// --- live-recorded channels ---------------------------------------------------
+
+const liveMoment = (over = {}) =>
+  moment({
+    id: 'chat:ishowspeed:1795036000',
+    broadcaster: 'ishowspeed',
+    vodId: null,
+    offsetSeconds: null,
+    reactionOffsetSeconds: Math.round((NOW - 120_000) / 1000),
+    live: { login: 'ishowspeed', peakAt: NOW - 120_000 },
+    liveReady: true,
+    game: 'grand theft auto vi',
+    ...over,
+  });
+
+test('a channel recorded live is cut without a VOD, once the recording has the window', () => {
+  const ready = select([liveMoment()]);
+  assert.equal(ready.picks.length, 1);
+  const waiting = select([liveMoment({ liveReady: false })]);
+  assert.deepEqual(waiting.skipped, { settling: 1 });
+});
+
+test('two live moments seconds apart on one channel are one moment', () => {
+  const cuts = [{ momentId: 'other', vodId: 'live-ishowspeed', offsetSeconds: Math.round((NOW - 125_000) / 1000), broadcaster: 'ishowspeed', at: NOW - 60_000 }];
+  assert.equal(select([liveMoment()], cuts).skipped['already-cut'], 1);
+});
+
+test("a live moment's recording is copied out when it is claimed", async () => {
+  const { calls, enqueue } = recorder();
+  const snapshots = [];
+  const auto = new AutoClipper({
+    enqueue,
+    now: () => NOW,
+    cfg,
+    snapshotLive: async (m) => {
+      snapshots.push(m.live.login);
+      return { snapshot: { files: [] }, anchorAt: m.live.peakAt, name: 'ishowspeed-1-t000000-x', snapshotDir: 'x' };
+    },
+  });
+  await auto.onPoll([liveMoment()]);
+  assert.deepEqual(snapshots, ['ishowspeed']);
+  assert.equal(calls[0].live.anchorAt, NOW - 120_000);
+  assert.equal(calls[0].vodId, null);
+});
+
+test('a live moment whose recording cannot be kept is failed, not queued', async () => {
+  const { calls, enqueue } = recorder();
+  const auto = new AutoClipper({
+    enqueue,
+    now: () => NOW,
+    cfg,
+    snapshotLive: async () => {
+      throw new Error('the recording does not cover this moment');
+    },
+  });
+  await auto.onPoll([liveMoment()]);
+  assert.equal(calls.length, 0);
+  assert.equal(auto.status().failed, 1);
+});

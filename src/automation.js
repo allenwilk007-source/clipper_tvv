@@ -16,7 +16,9 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { readFile } from 'node:fs/promises';
 import { basename, dirname, join, relative } from 'node:path';
 
-import { AutoClipper, autoclipConfig } from './autoclip.js';
+import { AutoClipper, autoclipConfig, momentLogin } from './autoclip.js';
+import { RecorderManager } from './live.js';
+import { clipBasename } from './clip.js';
 import { config } from './config.js';
 import { listTracks, shortformConfig } from './shortform.js';
 
@@ -236,12 +238,39 @@ export function collectorHealth({ skipped = {}, picks = 0, lookups = {} } = {}) 
   return { level: 'ok', message: null };
 }
 
+/**
+ * Mark the moments that can be cut from a live recording: no VOD, but a
+ * recorder running for the channel. The cut is centred on the chat peak in
+ * wall-clock time — the recording's own timestamps — and it is ready once
+ * the recording holds the whole window. The game comes from the recorder's
+ * last look at the channel's page, since there are no chapters to read.
+ */
+export function annotateLive(moments, recorders, { pre, post }) {
+  if (!recorders) return moments;
+  return moments.map((moment) => {
+    if (moment.vodId) return moment;
+    const recorder = recorders.get(momentLogin(moment));
+    const peak = Date.parse(moment.firstClipAt);
+    if (!recorder || !Number.isFinite(peak)) return moment;
+    return {
+      ...moment,
+      live: { login: recorder.login, peakAt: peak },
+      game: moment.game ?? recorder.game ?? null,
+      // Seconds since the epoch: a position on the recording's own clock,
+      // which keeps dedupe and the store working as they do for a VOD.
+      reactionOffsetSeconds: Math.round(peak / 1000),
+      liveReady: recorder.covers(peak - pre * 1000, peak + post * 1000),
+    };
+  });
+}
+
 export class Automation {
   constructor({
     feed,
     log = () => {},
     path = join(config.root, 'data', 'automation.json'),
     clipper,
+    recorders,
     env = process.env,
   } = {}) {
     this.feed = feed;
@@ -255,7 +284,16 @@ export class Automation {
       music: env.SHORTS_MUSIC === 'on',
       scope: 'channels',
     });
-    this.clipper = clipper || new AutoClipper({ store: feed.store, log, cfg: autoclipConfig(env) });
+    // Live recording, for channels with no VOD to cut from (see live.js).
+    this.recorders = env.RECORDING === 'off' ? null : recorders || new RecorderManager({ feed, log });
+    this.clipper =
+      clipper ||
+      new AutoClipper({
+        store: feed.store,
+        log,
+        cfg: autoclipConfig(env),
+        snapshotLive: (moment) => this.snapshotLive(moment),
+      });
     this.applyToClipper();
     this.timer = null;
     this.seen = null;
@@ -319,9 +357,32 @@ export class Automation {
   prepare() {
     if (this.settings.channels.length) this.feed.watchChannels = [...this.settings.channels];
     this.clipper.load();
+    this.recorders?.setChannels(this.settings.channels);
+  }
+
+  /** Copy a live moment's recording out of the buffer, for its job. */
+  async snapshotLive(moment) {
+    const recorder = this.recorders?.get(moment.live.login);
+    if (!recorder) throw new Error('the channel is no longer being recorded');
+    const peak = moment.live.peakAt;
+    const name = clipBasename({
+      vodId: String(Math.round(peak / 1000)),
+      offsetSeconds: Math.round(peak / 1000) % 86400,
+      broadcaster: moment.live.login,
+    });
+    const dest = join(this.clipper.cfg.workDir, `${name}-snapshot`);
+    const snapshot = await recorder.snapshot({
+      // Wide enough for a redo to slide its window, but always the cut itself.
+      from: peak - 55_000,
+      to: peak + 15_000,
+      need: [peak - this.clipper.cfg.pre * 1000, peak + this.clipper.cfg.post * 1000],
+      dest,
+    });
+    return { snapshot, anchorAt: peak, name, snapshotDir: dest };
   }
 
   start() {
+    this.recorders?.start();
     // The feed replaces its moments array on every poll, so a new array is a
     // new poll. Watching for that keeps the feed unaware of automation.
     this.timer = setInterval(() => {
@@ -330,7 +391,7 @@ export class Automation {
       this.seen = moments;
       if (!this.settings.enabled) return;
       this.clipper
-        .onPoll(moments)
+        .onPoll(annotateLive(moments, this.recorders, this.clipper.cfg))
         .then(() => this.checkHealth())
         .catch((err) => this.log(`autocollect: poll failed: ${err.message}`));
     }, 2000);
@@ -340,6 +401,7 @@ export class Automation {
   stop() {
     clearInterval(this.timer);
     this.timer = null;
+    this.recorders?.stop();
   }
 
   update(change = {}) {
@@ -350,6 +412,7 @@ export class Automation {
 
     this.applyToClipper();
     if (channelsChanged) {
+      this.recorders?.setChannels(next.channels);
       // Chat-only listens to exactly these. The full feed watches the whole
       // category, and there the list only decides what automation cuts.
       if (this.feed.chatOnly && this.feed.started) this.feed.setWatchList(next.channels);
@@ -362,6 +425,7 @@ export class Automation {
 
   /** What one channel is doing, as far as the feed can tell. */
   channelState(login) {
+    if (this.recorders?.get(login)) return 'recording live';
     const channel = this.feed.channels?.get(login);
     if (!this.feed.chatOnly) return channel ? 'live' : 'not live in category';
     if (channel?.vodId) return 'recording';
@@ -382,6 +446,7 @@ export class Automation {
       channels: this.settings.channels.map((login) => ({ login, state: this.channelState(login) })),
       status: this.clipper.status(),
       health: this.health,
+      recordings: this.recorders ? this.recorders.status() : [],
       lookups: this.feed.lookups || null,
       shorts: await listShorts(this.feed.store, this.dir, { limit: 48 }),
     };
