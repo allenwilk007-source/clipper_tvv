@@ -57,7 +57,12 @@ moments that have already passed every other rule**: which of the eligible
 moments are cut first when a cap bites. It may **not** be used to admit or
 exclude moments. That needs a separate test, declared in advance, with a
 control arm cut from below the line, so the correlation is measured across
-the whole range a selection rule would act on.
+the whole range a selection rule would act on. The control moments must be
+measured by detection's own probe (`measureAudio` sampling a random
+below-the-line moment per poll, flagged as control), never by a second
+probe in the cutter: two implementations would differ, and that difference
+would be indistinguishable from the effect. Agreed with the detection
+session, which will add it when that test is declared.
 
 Otherwise it stays out, and no subgroup or alternative cut of the same 60
 is used to revive it; a new hypothesis needs a new sample.
