@@ -221,10 +221,37 @@ offset is flat across every threshold: 67% at a 4 dB floor, 68% at 9 dB, 69%
 at 12 dB. A loud burst is no better placed than a quiet one, so a confidence
 gate built on height is a number standing in for an argument.
 
-Whatever gates the cut point has to be a property that bears on *placement* —
-whether the window held one event or several, say — and it has to show a
-gradient before it ships. `src/audiolag.js` prints the lead rate for each
-candidate gate so a flat column is visible rather than assumed.
+Isolation — how far the peak beats the best rival more than 5s away — was the
+replacement, on the theory that a window loud in five places cannot locate
+anything. It is the right *kind* of property, and it also fails: 42% at 2 dB,
+71% at 4 dB, 67% at 6 dB, 0% at 8 dB, on 19, 7, 3 and 1 moments. That is not
+a gradient, it is a sample running out.
+
+## The lead itself did not replicate
+
+Worth recording as the most expensive thing learned here, because it was
+reported as a finding before it was one.
+
+The 67% figure above came from 45 moments and 2.2 sigma. Re-run over 60, the
+audio peak preceded the chat offset in **30 of 60 — exactly 50%, 0.0 sigma,
+median lag 1.2s**. Pooled across both runs it is 60/105, 57%, 1.46 sigma.
+Not significant. **Stream audio does not lead chat in any way this can
+measure**, and the ~7s median lag quoted from the first run is not a real
+quantity to design around.
+
+Two habits this should buy:
+
+1. **A 2-sigma result at n=45 is a hypothesis, not a finding.** It was
+   reported downstream as a measured lag and a cut window was derived from it.
+   Nothing broke, because the gate it would have fed never opened — but the
+   number was load-bearing in someone else's design before it was checked.
+2. **Do not go looking for the subgroup where it still works.** The two
+   samples genuinely differ (the first was 13 large English channels, the
+   second 66 including many small and non-English ones), so there is an
+   inviting story about chat size. Chasing it after seeing the null is how a
+   dead effect gets resurrected: enough splits and one of them clears 2 sigma
+   by construction. If chat size matters, it gets its own hypothesis and its
+   own fresh sample, declared before looking.
 
 ## How to tell if any of this worked
 
