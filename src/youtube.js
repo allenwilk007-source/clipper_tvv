@@ -47,6 +47,10 @@ export function classify(status, body) {
   const text = JSON.stringify(reasons);
   if (/quotaExceeded|dailyLimitExceeded|uploadLimitExceeded|rateLimitExceeded/.test(text)) return 'quota';
   if (status === 401 || /invalid_grant|unauthorized_client|authError/.test(text)) return 'auth';
+  // Any other 403 is about the account, not the video: missing permission,
+  // no channel, closed or suspended. Treating it as a refusal of this short
+  // would strike off every short in turn, one per slot, so it stops instead.
+  if (status === 403) return 'auth';
   if (status >= 500 || status === 429) return 'transient';
   return 'refused';
 }

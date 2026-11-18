@@ -251,3 +251,19 @@ test('it cannot be switched on without keys and a sign-in', async () => {
   await u.setMode('youtube', 'dry-run');
   assert.equal(u.settings.youtube.mode, 'dry-run');
 });
+
+test("YouTube's errors are told apart: quota, account, this video, or the network", async () => {
+  const { classify } = await import('./youtube.js');
+  const err = (reason) => ({ error: { errors: [{ reason }] } });
+  assert.equal(classify(403, err('quotaExceeded')), 'quota');
+  assert.equal(classify(400, err('uploadLimitExceeded')), 'quota');
+  assert.equal(classify(401, err('authError')), 'auth');
+  // Account-level 403s stop uploads rather than striking off short after short.
+  assert.equal(classify(403, err('insufficientPermissions')), 'auth');
+  assert.equal(classify(403, err('youtubeSignupRequired')), 'auth');
+  assert.equal(classify(403, null), 'auth');
+  // Only a problem with this video is a refusal of it.
+  assert.equal(classify(400, err('invalidTitle')), 'refused');
+  assert.equal(classify(503, null), 'transient');
+  assert.equal(classify(429, null), 'transient');
+});
