@@ -78,7 +78,9 @@ export function autoclipConfig(source = process.env) {
  * How much to cut either side of the offset, by where the offset came from.
  *
  * The default 25s before and 5s after is built for a CHAT offset: chat
- * reacts after the thing happens, so the moment sits well before it.
+ * reacts after the thing happens, so the moment sits well before it. That is
+ * reasoning (broadcast delay plus reaction time), not a measurement: no
+ * valid figure for chat's lag exists, and it should not be quoted as one.
  *
  * The AUDIO branch is DORMANT, and its numbers have no evidence behind them.
  * It was added for detection to set reactionOffsetSeconds to the stream's
