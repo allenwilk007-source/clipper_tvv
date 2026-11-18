@@ -26,12 +26,41 @@ const LOGIN = /^[a-z0-9_]{1,25}$/;
  * yt-dlp names archives `v2932444934`; Helix, and so everything downstream,
  * uses the bare `2932444934`. Left as-is, the deep link came out as
  * twitch.tv/videos/v... — so the id is normalised here, once.
+ *
+ * `chapters` are Twitch's game markers for the recording, and they exist while
+ * it is still being made. Measured on three live channels: lirik was one
+ * "Grand Theft Auto VI" chapter; sodapoppin was "Just Chatting" then "World of
+ * Warcraft" from 909s; tarik was "VALORANT". That is the only way to know what
+ * game a moment came from without credentials.
  */
-export function liveArchiveFrom({ id, timestamp, liveStatus }) {
+export function liveArchiveFrom({ id, timestamp, liveStatus, chapters = [] }) {
   const raw = String(id || '').trim();
   if (liveStatus !== 'is_live' || !/^v?\d+$/.test(raw)) return null;
   if (!Number.isFinite(timestamp) || timestamp <= 0) return null;
-  return { vodId: raw.replace(/^v/, ''), startedAt: timestamp * 1000 };
+  return {
+    vodId: raw.replace(/^v/, ''),
+    startedAt: timestamp * 1000,
+    chapters: (Array.isArray(chapters) ? chapters : [])
+      .map((chapter) => ({ title: String(chapter?.title || '').trim(), start: Number(chapter?.start_time) }))
+      .filter((chapter) => chapter.title && Number.isFinite(chapter.start))
+      .sort((a, b) => a.start - b.start),
+  };
+}
+
+/**
+ * The game on screen at a second of the recording, or null if unknown.
+ *
+ * The last chapter is the one being recorded now, so it has no real end —
+ * yt-dlp reports its end as equal to its start — and runs on to the present.
+ */
+export function gameAt(chapters, offsetSeconds) {
+  if (!Array.isArray(chapters) || !chapters.length || !Number.isFinite(offsetSeconds)) return null;
+  let current = null;
+  for (const chapter of chapters) {
+    if (chapter.start <= offsetSeconds) current = chapter;
+    else break;
+  }
+  return current?.title || null;
 }
 
 /** {vodId, startedAt(ms)} for the recording in progress, or null. */
@@ -54,12 +83,22 @@ export async function findLiveArchive(login) {
   ]);
   if (!/^v?\d+$/.test(id)) return null;
 
-  const [timestamp, liveStatus] = (
-    await first([
-      '--print',
-      '%(timestamp)s|%(live_status)s',
-      `https://www.twitch.tv/videos/${id.replace(/^v/, '')}`,
-    ])
-  ).split('|');
-  return liveArchiveFrom({ id, timestamp: Number(timestamp), liveStatus });
+  // One call for start, status and chapters.
+  const { stdout } = await run(
+    file,
+    [...prefix, '-J', `https://www.twitch.tv/videos/${id.replace(/^v/, '')}`],
+    { cwd: config.root, label: 'yt-dlp' },
+  );
+  let info;
+  try {
+    info = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  return liveArchiveFrom({
+    id,
+    timestamp: Number(info.timestamp),
+    liveStatus: info.live_status,
+    chapters: info.chapters,
+  });
 }

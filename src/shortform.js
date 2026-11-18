@@ -1,72 +1,85 @@
 // Turning a cut into something you could post.
 //
-// A 9:16 frame with a caption burned in, loudness evened out, and a text file
-// beside it holding the post copy and the credit. That is where this module
-// stops: it writes a file to disk. Posting it is a separate, deliberate step
-// this tool does not take.
+// A 9:16 frame with a title, word-timed subtitles and a credit burned in,
+// loudness evened out, optional background music, and files beside it holding
+// the post copy. Posting is a click away in the panel, but it is your click:
+// nothing here uploads anything on its own.
 //
-// Most of what is here is about text, because text is where burning captions
-// in goes wrong quietly:
+// All on-screen text goes through ONE subtitle file rendered by libass, rather
+// than ffmpeg's drawtext. Measured on this machine: drawtext cannot fall back
+// from one font to another, so a title with an emoji in it either loses the
+// emoji or loses the letters; libass falls back to Segoe UI Emoji on its own,
+// and draws the per-word highlight the subtitles need. Neither renderer draws
+// colour emoji — they come out as clean white outlines — so the post copy,
+// which TikTok and Instagram render themselves, is where the colour ones go.
 //
-//   * drawtext expands `%{...}` sequences, and Twitch titles contain `%`. A
-//     title of "100% cooked" would otherwise be interpreted, not printed.
-//   * the font path on Windows starts with a drive letter, and the colon in
-//     "C:" is the option separator in a filtergraph. Unescaped, the path is
-//     split in half and the error names neither the font nor the cause.
-//   * a font has no glyph for most emoji or for non-Latin scripts, and the
-//     result is a row of empty boxes in the most prominent part of the frame.
+// Most of what is here is about text, because text is where this goes wrong
+// quietly:
 //
-// So the caption goes in via `textfile=` (no in-graph quoting of what anyone
-// typed), expansion is switched off, the character set is pinned to what the
-// font can draw, and every path goes through one tested escaping function.
+//   * a Windows path starts with a drive letter, and the colon in "C:" is the
+//     option separator in a filtergraph. Every path goes through one tested
+//     escaping function.
+//   * `{` and `\` mean something to libass. Anything a streamer said or a
+//     clipper typed is escaped before it reaches the subtitle file.
+//   * a font has no glyph for most non-Latin scripts, and the result is a row
+//     of empty boxes in the most prominent part of the frame.
+//   * streamers swear, and say worse. Slurs are always masked; ordinary
+//     swearing is masked unless SHORTS_CENSOR=off.
 
-import { existsSync } from 'node:fs';
-import { copyFile, mkdir, rename, rm, writeFile } from 'node:fs/promises';
-import { basename, dirname, extname, join } from 'node:path';
+import { copyFile, mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { basename, dirname, extname, join, resolve } from 'node:path';
 
-import { config } from './config.js';
-import { formatClipTimestamp, run, verticalFilter } from './clip.js';
+import { GAME_HASHTAGS, config } from './config.js';
+import { formatClipTimestamp, run, splitCommand, verticalFilter } from './clip.js';
+import { validateShort } from './validate.js';
 
 const env = process.env;
 
 // Two looks:
 //
 //   reel  the format clippers post most: solid black, the whole frame across
-//         the middle, plain white text sitting right on top of the picture.
-//         Default, because it is what the reference reel does and what reads
-//         as native on the feed.
+//         the middle, white text sitting right on top of the picture.
 //   blur  a zoomed, blurred copy fills the canvas behind the frame, with an
-//         outlined caption in the band above.
+//         outlined title in the band above.
 //
-// Neither crops: in GTA the thing worth clipping is as often at the edge of
-// frame as in the middle.
-const FONTS = {
-  win32: {
-    reel: 'C:/Windows/Fonts/segoeuib.ttf', // Segoe UI Bold: the reel's weight
-    blur: 'C:/Windows/Fonts/seguibl.ttf', // Segoe UI Black: holds up over busy blur
-  },
-  other: '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
-};
-
+// Neither crops: in GTA and Fortnite the thing worth clipping is as often at
+// the edge of frame as in the middle.
 export const shortformConfig = () => {
   const style = env.SHORTS_STYLE === 'blur' ? 'blur' : 'reel';
+  const windows = process.platform === 'win32';
+  const volume = Number(env.SHORTS_MUSIC_VOLUME);
   return {
     style,
-    font: env.SHORTS_FONT || (process.platform === 'win32' ? FONTS.win32[style] : FONTS.other),
-    hashtags: (env.SHORTS_HASHTAGS ?? '#gta6 #gtavi #gaming #twitch').trim(),
+    // libass picks fonts by family name, from this folder plus the system's.
+    fontName:
+      env.SHORTS_FONT_NAME || (windows ? (style === 'blur' ? 'Segoe UI Black' : 'Segoe UI') : 'DejaVu Sans'),
+    fontsDir: env.SHORTS_FONTS_DIR || (windows ? 'C:/Windows/Fonts' : '/usr/share/fonts'),
+    // Set: these tags for every game. Unset: the tags for the clip's game.
+    hashtags: env.SHORTS_HASHTAGS?.trim() || null,
     // Short-form platforms normalise loudness on their side; delivering near
     // their target means the clip is not turned down, or up into the noise.
     loudness: Number(env.SHORTS_LUFS) || -14,
+    censor: env.SHORTS_CENSOR !== 'off',
+    subtitles: env.SHORTS_SUBTITLES !== 'off',
+    // The streamer's camera on top, when a webcam can be found in the clip.
+    facecam: env.SHORTS_FACECAM !== 'off',
+    speechModel: env.SUBTITLES_MODEL || 'base.en',
+    python: env.PYTHON_CMD || 'python',
+    musicDir: resolve(config.root, env.SHORTS_MUSIC_DIR || 'music'),
+    // Under the voice, not over it: about -18 dB, and pushed down further by
+    // ducking whenever someone talks.
+    musicVolume: Number.isFinite(volume) && volume > 0 ? Math.min(volume, 1) : 0.12,
   };
 };
 
 // ---------------------------------------------------------------------------
-// Caption text
+// Text
 // ---------------------------------------------------------------------------
 
-// Everything the default fonts can draw: Latin letters with their accents,
-// digits, and ordinary punctuation. Anything else would render as tofu.
-const UNDRAWABLE = /[^\p{Script=Latin}\p{N}\s.,!?'"&:;()\-–—…%$#@+/]/gu;
+// Latin letters with their accents, digits, ordinary punctuation and emoji.
+// Anything else would print as empty boxes.
+const UNDRAWABLE = /[^\p{Script=Latin}\p{N}\s.,!?'"&:;()\-–—…%$#@+/\p{Extended_Pictographic}\u200d\ufe0f]/gu;
+const EMOJI = /\p{Extended_Pictographic}/u;
 
 /**
  * A title made fit to print over video.
@@ -90,9 +103,9 @@ export function cleanCaption(raw) {
         .replace(UNDRAWABLE, ' ')
         .split(/\s+/)
         // Stripping undrawable characters can strand the punctuation around
-        // them ("%{pts}" leaves a bare "%"). A token with no letter or digit
-        // left in it is debris, unless it is the "!!!" or "???" itself.
-        .filter((token) => /[\p{L}\p{N}]/u.test(token) || /^[!?…]+$/.test(token))
+        // them ("%{pts}" leaves a bare "%"). A token with nothing readable left
+        // in it is debris, unless it is the "!!!" or "???" itself.
+        .filter((token) => /[\p{L}\p{N}\p{Extended_Pictographic}]/u.test(token) || /^[!?…]+$/.test(token))
         .join(' ')
         .trim(),
     )
@@ -103,93 +116,218 @@ export function cleanCaption(raw) {
   return letters >= 3 ? cleaned : '';
 }
 
+// Always masked, whatever SHORTS_CENSOR says.
+const SLURS = [
+  /\bn+[i1!]+gg+(?:a|ah|as|az|er|ers|uh)?\b/gi,
+  /\bf+[a@]+gg*(?:ot|ots|s)?\b/gi,
+  /\bretard(?:ed|s)?\b/gi,
+];
+// Masked by default, because burned-in swearing gets a short shown to fewer
+// people on both platforms.
+const SWEARS = /\b(?:fuck\w*|shit\w*|bitch\w*|cunt\w*|asshole\w*)\b/gi;
+
+export function censor(text, { mild = true } = {}) {
+  let out = String(text ?? '');
+  for (const slur of SLURS) out = out.replace(slur, (word) => '*'.repeat(word.length));
+  if (mild) out = out.replace(SWEARS, (word) => word[0] + '*'.repeat(word.length - 1));
+  return out;
+}
+
 /**
  * Greedy word wrap into at most `maxLines` lines of `maxChars`.
- *
- * drawtext does not wrap, so a long caption would run straight off both edges
- * of a 1080-wide frame. 16 characters at the default size keeps a line clear
- * of the column of buttons TikTok and Reels draw down the right-hand side.
+ * Counted in characters a person sees, so an emoji is one, not two.
  */
 export function wrapCaption(text, { maxChars = 16, maxLines = 3 } = {}) {
   const words = String(text).split(/\s+/).filter(Boolean);
   const lines = [];
   let line = '';
+  const len = (s) => Array.from(s).length;
 
-  for (let word of words) {
+  for (const original of words) {
+    let word = Array.from(original);
     // A single word longer than a line is split rather than allowed to overflow.
     while (word.length > maxChars) {
       if (line) {
         lines.push(line);
         line = '';
       }
-      lines.push(word.slice(0, maxChars));
+      lines.push(word.slice(0, maxChars).join(''));
       word = word.slice(maxChars);
     }
-    if (!word) continue;
-    if (!line) line = word;
-    else if (line.length + 1 + word.length <= maxChars) line = `${line} ${word}`;
+    const piece = word.join('');
+    if (!piece) continue;
+    if (!line) line = piece;
+    else if (len(line) + 1 + len(piece) <= maxChars) line = `${line} ${piece}`;
     else {
       lines.push(line);
-      line = word;
+      line = piece;
     }
   }
   if (line) lines.push(line);
 
   if (lines.length <= maxLines) return lines;
   const kept = lines.slice(0, maxLines);
-  const last = kept[maxLines - 1];
-  kept[maxLines - 1] = `${last.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+  const last = Array.from(kept[maxLines - 1]);
+  kept[maxLines - 1] = `${last.slice(0, Math.max(0, maxChars - 1)).join('').trimEnd()}…`;
   return kept;
 }
 
-// What chat was doing, said the way a caption would say it. Only used when it
-// is backed by evidence: a class has to have actually spiked to be named.
-// Sentence case, as the reel writes its hook: it reads as a person talking
-// rather than a banner.
-export const REACTION_HOOKS = {
-  clipit: 'Chat said clip it',
-  funny: 'Chat lost it',
-  shock: 'Wait what',
-  hype: "Let's go",
-  tension: 'Oh no',
+/**
+ * What chat was doing, said the way a caption would say it, with the emoji that
+ * goes with it. A hook is only used when that class actually spiked, and there
+ * are several per class so a busy hour does not post the same words twice.
+ */
+export const REACTIONS = {
+  clipit: { emoji: ['🎬', '👀'], hooks: ['Chat said clip it', 'Chat begged for this clip', '{name} gave chat a clip'] },
+  funny: {
+    emoji: ['😂', '💀', '🤣'],
+    hooks: ['Chat lost it', "{name}'s chat could not breathe", 'This had chat crying', '{name} broke chat'],
+  },
+  shock: { emoji: ['😳', '😱', '🤯'], hooks: ['Wait what', 'Chat could not believe it', '{name} was not ready for that'] },
+  hype: { emoji: ['🔥', '😤', '🙌'], hooks: ["Let's go", '{name} went crazy', 'Chat went wild'] },
+  tension: { emoji: ['😬', '😰'], hooks: ['Oh no', 'This got tense', 'Chat was holding its breath'] },
 };
+const NEUTRAL = { emoji: ['👀', '🔥'], hooks: ['{name} in {game}', 'Wait for it', 'Watch what {name} does'] };
 
 /** The reaction class that spiked hardest, or null if none clearly did. */
 export function dominantReaction(chat, { minZ = 2 } = {}) {
   let best = null;
   for (const [name, stats] of Object.entries(chat?.classes || {})) {
     const z = Number(stats?.z);
-    if (!Number.isFinite(z) || z < minZ || !REACTION_HOOKS[name]) continue;
+    if (!Number.isFinite(z) || z < minZ || !REACTIONS[name]) continue;
     if (!best || z > best.z) best = { name, z };
   }
   return best?.name || null;
 }
 
-/**
- * The headline for a moment.
- *
- * A clip title is a human describing this exact moment, so it wins when there
- * is one. A chat-only moment carries the *stream* title, which describes the
- * whole broadcast rather than the thirty seconds being posted, so there the
- * reaction hook goes first.
- */
-export function captionFor(moment, { game = config.gameName } = {}) {
-  const title = cleanCaption(moment?.title);
-  const hook = REACTION_HOOKS[dominantReaction(moment?.chat)] || '';
-  const chatOnly = moment?.source === 'chat';
-
-  const pick = chatOnly ? hook || title : title || hook;
-  if (pick) return pick;
-
-  const who = cleanCaption(moment?.broadcaster);
-  const what = String(game || '').trim();
-  if (who && what) return `${who} in ${what}`;
-  return who || what || 'Watch this';
+/** A small stable hash, so one moment always gets the same picks. */
+export function hashOf(text) {
+  let hash = 2166136261;
+  for (const char of String(text)) {
+    hash ^= char.codePointAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
 }
+
+/** Speech as sentences, split on end punctuation or a pause. */
+export function sentencesFrom(words, { maxGap = 0.7 } = {}) {
+  const sentences = [];
+  let current = [];
+  const flush = () => {
+    if (!current.length) return;
+    sentences.push({
+      text: current.map((w) => w.word).join(' ').replace(/\s+/g, ' ').trim(),
+      start: current[0].start,
+      end: current.at(-1).end,
+    });
+    current = [];
+  };
+  for (const raw of words || []) {
+    const word = String(raw?.word || '').trim();
+    if (!word || !Number.isFinite(raw.start) || !Number.isFinite(raw.end)) continue;
+    if (current.length && raw.start - current.at(-1).end > maxGap) flush();
+    current.push({ word, start: raw.start, end: raw.end });
+    if (/[.!?]["')\]]*$/.test(word)) flush();
+  }
+  flush();
+  return sentences;
+}
+
+const FILLER = /^(?:(?:uh+|um+|uhm|erm|like|so|and|but|okay|ok|yeah|oh|well|i mean),?\s+)+/i;
+// Words that say nothing about what happened on their own.
+const EMPTY_WORDS = new Set(
+  'yeah yes no ok okay oh uh um what bro dude guys chat so like the a an and but i it is that this just right huh wow hmm man dog lol oh my god yo'.split(
+    ' ',
+  ),
+);
+
+/**
+ * The line the streamer said that best says what happened.
+ *
+ * Streamers narrate: "he just stole the cop car", "I'm actually done". The
+ * line nearest to just before the reaction is usually that narration, so it is
+ * preferred, with a nudge for lines that end in "!" or "?" and for lines short
+ * enough to read in a glance. A line of nothing but filler is never chosen.
+ */
+export function pickQuote(words, { reactionAt = 25, mild = true } = {}) {
+  let best = null;
+  for (const sentence of sentencesFrom(words)) {
+    if (sentence.end < reactionAt - 14 || sentence.start > reactionAt + 4) continue;
+    const text = sentence.text.replace(FILLER, '').replace(/[.,;:]+$/, '').trim();
+    const tokens = text.split(/\s+/).filter(Boolean);
+    if (tokens.length < 2 || tokens.length > 12) continue;
+    const meaningful = tokens.filter((t) => !EMPTY_WORDS.has(t.toLowerCase().replace(/[^a-z']/g, ''))).length;
+    if (meaningful < 2) continue;
+
+    const middle = (sentence.start + sentence.end) / 2;
+    let score = 1 - Math.min(1, Math.abs(middle - (reactionAt - 2)) / 16);
+    if (/[!?]$/.test(text)) score += 0.4;
+    if (tokens.length >= 3 && tokens.length <= 8) score += 0.2;
+    if (!best || score > best.score) best = { text, score };
+  }
+  if (!best) return null;
+  const text = censor(best.text, { mild });
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+// A clip "title" that is really the stream title Twitch filled in by default.
+const STREAM_TITLE = /[|[\]]|(^|\s)!\w|\bday\s*\d+\b|24\/7|\bsubathon\b|\bstream\b|\bdrops\b/i;
+
+const sameTitle = (text) => String(text).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+/**
+ * The title for a moment: about what happened in it, with an emoji.
+ *
+ * In order of how well each says what happened:
+ *   1. a clip title a person wrote about this exact moment
+ *   2. the line the streamer said as it happened (needs the transcript)
+ *   3. what chat did, from the reaction class that spiked
+ * Anything in `avoid` (recent titles) is skipped, so a run of moments on the
+ * same channel does not produce the same title twice.
+ */
+export function titleFor(
+  moment,
+  { words = null, reactionAt = 25, avoid = [], game = moment?.game || config.gameName, mild = true } = {},
+) {
+  const taken = new Set([...avoid].map(sameTitle));
+  const reaction = REACTIONS[dominantReaction(moment?.chat)] || NEUTRAL;
+  const seed = hashOf(moment?.id || moment?.title || moment?.broadcaster || '');
+  const emojiAt = (i) => reaction.emoji[(seed + i) % reaction.emoji.length];
+  const withEmoji = (text, i = 0) => (EMOJI.test(text) ? text : `${text} ${emojiAt(i)}`);
+  const name = cleanCaption(moment?.broadcaster) || 'They';
+  const raw = String(moment?.title || '');
+
+  const candidates = [];
+  if (moment?.source !== 'chat' && !STREAM_TITLE.test(raw)) {
+    const clipTitle = cleanCaption(raw);
+    if (clipTitle) candidates.push(withEmoji(censor(clipTitle, { mild })));
+  }
+  const quote = words?.length ? pickQuote(words, { reactionAt, mild }) : null;
+  if (quote) candidates.push(withEmoji(`"${quote}"`));
+  reaction.hooks.forEach((_, i) => {
+    const hook = reaction.hooks[(seed + i) % reaction.hooks.length]
+      .replace('{name}', name)
+      .replace('{game}', game || 'this');
+    candidates.push(`${hook} ${emojiAt(i)}`);
+  });
+  // Last resorts, still distinct from each other.
+  reaction.hooks.forEach((hook, i) => {
+    candidates.push(`${name}: ${hook.replace('{name}', 'chat').replace('{game}', game || 'this')} ${emojiAt(i + 1)}`);
+  });
+
+  return candidates.find((candidate) => !taken.has(sameTitle(candidate))) || candidates[0];
+}
+
+/** The title before there is a transcript (what the queue shows meanwhile). */
+export const captionFor = (moment, options = {}) => titleFor(moment, { ...options, words: null });
 
 /** The on-screen credit. Empty when the name has nothing the font can draw. */
 export function creditFor(moment) {
-  const name = String(moment?.broadcaster || '').replace(UNDRAWABLE, '').trim();
+  const name = String(moment?.broadcaster || '')
+    .replace(UNDRAWABLE, '')
+    .replace(EMOJI, '')
+    .trim();
   return name ? `@${name} on Twitch` : '';
 }
 
@@ -202,27 +340,293 @@ export function twitchTime(totalSeconds) {
   return `${h}h${String(m).padStart(2, '0')}m${String(sec).padStart(2, '0')}s`;
 }
 
-/**
- * The text to paste when posting: caption, credit with a link straight to the
- * moment in the full stream, and tags.
- */
-export function postTextFor(moment, { caption, start, hashtags = shortformConfig().hashtags } = {}) {
-  const who = String(moment?.broadcaster || '').trim();
-  const login = who.toLowerCase().replace(/[^a-z0-9_]/g, '');
-  const vod = String(moment?.vodId || '').replace(/^v/, '');
-  const tags = [hashtags, login ? `#${login}` : ''].filter(Boolean).join(' ');
+/** Tags for a clip: the configured override, else the clip's own game's. */
+export function hashtagsFor(moment, { hashtags = null } = {}) {
+  const base = hashtags || GAME_HASHTAGS[String(moment?.game || '').toLowerCase()] || '#gaming #twitch';
+  const login = String(moment?.broadcaster || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, '');
+  return [base, login ? `#${login}` : ''].filter(Boolean).join(' ');
+}
 
+/**
+ * Everything a post needs, in pieces, so each platform's button can put them
+ * in the order that platform wants.
+ */
+export function postPartsFor(moment, { caption, start, hashtags = null } = {}) {
+  const who = String(moment?.broadcaster || '').trim();
+  const vod = String(moment?.vodId || '').replace(/^v/, '');
+  return {
+    caption: caption || captionFor(moment),
+    credit: who ? `Credit: ${who} on Twitch` : '',
+    link: vod ? `https://www.twitch.tv/videos/${vod}?t=${twitchTime(start)}` : '',
+    tags: hashtagsFor(moment, { hashtags }),
+    game: moment?.game || null,
+    broadcaster: who || null,
+  };
+}
+
+/** The plain-text post copy written beside each short. */
+export function postTextFor(moment, options = {}) {
+  const parts = postPartsFor(moment, options);
   return [
-    caption || captionFor(moment),
+    parts.caption,
     '',
-    who ? `Credit: ${who} on Twitch` : null,
-    vod ? `Full stream: https://www.twitch.tv/videos/${vod}?t=${twitchTime(start)}` : null,
+    parts.credit || null,
+    parts.link ? `Full stream: ${parts.link}` : null,
     '',
-    tags,
+    parts.tags,
     '',
   ]
     .filter((line) => line !== null)
     .join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Subtitles
+// ---------------------------------------------------------------------------
+
+/**
+ * Words grouped the way short-form subtitles are read: one to three at a
+ * time, broken at a pause or the end of a sentence. Each chunk stays up until
+ * the next one starts (or half a second after its last word), so the screen
+ * does not flicker between words.
+ */
+export function subtitleChunks(words, { maxWords = 3, maxChars = 18, maxGap = 0.6, mild = true } = {}) {
+  const chunks = [];
+  let current = [];
+  const flush = () => {
+    if (current.length) chunks.push(current);
+    current = [];
+  };
+  for (const raw of words || []) {
+    if (!Number.isFinite(raw?.start) || !Number.isFinite(raw?.end)) continue;
+    const spoken = String(raw.word || '').trim();
+    const text = censor(spoken.replace(/^[^\p{L}\p{N}']+|[^\p{L}\p{N}'!?]+$/gu, ''), { mild });
+    if (!text) continue;
+    const chars = current.reduce((n, w) => n + w.text.length + 1, 0);
+    if (
+      current.length &&
+      (current.length >= maxWords || chars + text.length > maxChars || raw.start - current.at(-1).end > maxGap)
+    ) {
+      flush();
+    }
+    current.push({ text, start: raw.start, end: Math.max(raw.end, raw.start + 0.05) });
+    if (/[.!?]$/.test(spoken)) flush();
+  }
+  flush();
+
+  return chunks.map((chunk, i) => {
+    const next = chunks[i + 1];
+    const last = chunk.at(-1).end;
+    const end = next ? Math.min(next[0].start, last + 0.5) : last + 0.5;
+    return { words: chunk, start: chunk[0].start, end: Math.max(end, last) };
+  });
+}
+
+/** H:MM:SS.cc, the only time format libass reads. */
+export function assTime(seconds) {
+  const cs = Math.max(0, Math.round(Number(seconds) * 100) || 0);
+  const h = Math.floor(cs / 360000);
+  const m = Math.floor((cs % 360000) / 6000);
+  const s = Math.floor((cs % 6000) / 100);
+  return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(cs % 100).padStart(2, '0')}`;
+}
+
+/** Text made inert for libass: `{` opens an override block and `\` a command. */
+export const escapeAss = (text) =>
+  String(text ?? '')
+    .replace(/\\/g, '/')
+    .replace(/\{/g, '(')
+    .replace(/\}/g, ')')
+    .replace(/\r?\n/g, ' ');
+
+/** Where the picture sits on the canvas, from the source's own shape. */
+export function pictureBox({ width = 1080, height = 1920, sourceWidth = 1920, sourceHeight = 1080 } = {}) {
+  const aspect = sourceWidth > 0 && sourceHeight > 0 ? sourceHeight / sourceWidth : 9 / 16;
+  const pictureH = Math.min(height, Math.round((width * aspect) / 2) * 2);
+  const pictureTop = Math.floor((height - pictureH) / 4) * 2;
+  return { pictureH, pictureTop, pictureBottom: pictureTop + pictureH };
+}
+
+/**
+ * Where each piece of text goes. The title sits directly on top of the picture
+ * (reel) or centred in the band above it (blur). Subtitles go directly under
+ * the picture, where they cover neither the game's HUD nor the platform's
+ * description overlay at the very bottom; the credit goes under them.
+ */
+export function layoutFor({
+  style = 'reel',
+  width = 1080,
+  height = 1920,
+  sourceWidth,
+  sourceHeight,
+  subtitles = true,
+  camH = 0,
+} = {}) {
+  if (camH > 0) return camLayout({ width, height, sourceWidth, sourceHeight, camH });
+  const box = pictureBox({ width, height, sourceWidth, sourceHeight });
+  const gap = Math.round(height * 0.025);
+  const titleSize = Math.round(width * (style === 'blur' ? 0.07 : 0.062));
+  const subSize = Math.round(width * 0.064);
+  const creditSize = Math.round(width * 0.037);
+  const subsTop = box.pictureBottom + gap;
+  return {
+    ...box,
+    width,
+    height,
+    titleSize,
+    subSize,
+    creditSize,
+    title: style === 'blur' ? { an: 5, y: Math.round(height * 0.17) } : { an: 2, y: box.pictureTop - gap },
+    subs: { an: 8, y: subsTop },
+    credit: { an: 8, y: subtitles ? subsTop + Math.round(subSize * 1.3) + gap : subsTop },
+  };
+}
+
+/**
+ * The webcam crop, reshaped for the top of the frame.
+ *
+ * Shown full width; its height follows the webcam's own shape within limits,
+ * so a wide overlay is not stretched into a tall one. When the crop has to
+ * lose height, more comes off the bottom than the top: the face is in the
+ * upper part of a webcam and the desk is in the lower.
+ */
+export function fitCam(rect, { width = 1080, minH = 420, maxH = 600 } = {}) {
+  if (!rect || !(rect.w > 0) || !(rect.h > 0)) return null;
+  const natural = Math.round((width * rect.h) / rect.w / 2) * 2;
+  const outH = Math.min(maxH, Math.max(minH, natural));
+  const wanted = width / outH;
+  let { x, y, w, h } = rect;
+  if (w / h > wanted) {
+    const narrower = h * wanted;
+    x += (w - narrower) / 2;
+    w = narrower;
+  } else {
+    const shorter = w / wanted;
+    y += (h - shorter) * 0.35;
+    h = shorter;
+  }
+  const even = (v) => Math.max(0, Math.floor(v / 2) * 2);
+  return { x: even(x), y: even(y), w: Math.max(2, even(w)), h: Math.max(2, even(h)), outH };
+}
+
+/**
+ * Camera on top: the streamer's webcam across the top, the game directly
+ * under it, the title above both and the credit below. Subtitles sit on the
+ * seam between the two, the classic place for them in this layout, and
+ * the pair fills about 60% of the screen against about a third for the game
+ * on its own — the reviewer's main complaint about the plain layout.
+ */
+export function camLayout({ width = 1080, height = 1920, sourceWidth, sourceHeight, camH }) {
+  const { pictureH } = pictureBox({ width, height, sourceWidth, sourceHeight });
+  const stackH = camH + pictureH;
+  const gap = Math.round(height * 0.025);
+  // Room for a two-line title above, clear of the platform's top bar.
+  const camTop = Math.max(340, Math.floor((height - stackH) / 4) * 2 - 40);
+  return {
+    cam: true,
+    width,
+    height,
+    camTop,
+    camH,
+    pictureTop: camTop + camH,
+    pictureH,
+    pictureBottom: camTop + stackH,
+    titleSize: Math.round(width * 0.062),
+    subSize: Math.round(width * 0.07),
+    creditSize: Math.round(width * 0.037),
+    subOutline: 6,
+    titleLines: 2,
+    title: { an: 2, y: camTop - gap },
+    subs: { an: 5, y: camTop + camH },
+    credit: { an: 8, y: camTop + stackH + gap },
+  };
+}
+
+/** The one subtitle file holding every piece of on-screen text. */
+export function buildAss({ layout, style = 'reel', titleLines = [], credit = '', chunks = [], fontName = 'Segoe UI' }) {
+  const x = Math.round(layout.width / 2);
+  const font = escapeAss(fontName).replace(/,/g, ' ');
+  const titleOutline = style === 'blur' ? Math.round(layout.width * 0.0065) : 0;
+  const creditColour = style === 'blur' ? '&H00FFFFFF' : '&H00BDBDBD';
+  const creditOutline = style === 'blur' ? 3 : 0;
+  const style_ = (name, size, colour, outline, align) =>
+    `Style: ${name},${font},${size},${colour},&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${outline},0,${align},40,40,0,1`;
+  const at = (an, y) => `{\\an${an}\\pos(${x},${y})}`;
+  const forever = '9:59:59.00';
+
+  const events = [];
+  if (titleLines.length) {
+    events.push(
+      `Dialogue: 2,0:00:00.00,${forever},Title,,0,0,0,,${at(layout.title.an, layout.title.y)}${titleLines.map(escapeAss).join('\\N')}`,
+    );
+  }
+  if (credit) {
+    events.push(`Dialogue: 2,0:00:00.00,${forever},Credit,,0,0,0,,${at(layout.credit.an, layout.credit.y)}${escapeAss(credit)}`);
+  }
+  // One event per spoken word: the whole chunk, with the word being said in
+  // yellow. The highlight is what makes subtitles readable at a glance.
+  for (const chunk of chunks) {
+    chunk.words.forEach((word, i) => {
+      const start = i === 0 ? chunk.start : word.start;
+      const next = chunk.words[i + 1];
+      const end = Math.max(next ? next.start : chunk.end, start + 0.05);
+      const text = chunk.words
+        .map((w, j) => (j === i ? `{\\c&H00FFFF&}${escapeAss(w.text)}{\\c&HFFFFFF&}` : escapeAss(w.text)))
+        .join(' ');
+      events.push(`Dialogue: 1,${assTime(start)},${assTime(end)},Sub,,0,0,0,,${at(layout.subs.an, layout.subs.y)}${text}`);
+    });
+  }
+
+  return [
+    '[Script Info]',
+    'ScriptType: v4.00+',
+    `PlayResX: ${layout.width}`,
+    `PlayResY: ${layout.height}`,
+    // We wrap the title ourselves; libass must not re-wrap it.
+    'WrapStyle: 2',
+    'ScaledBorderAndShadow: yes',
+    '',
+    '[V4+ Styles]',
+    'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
+    style_('Title', layout.titleSize, '&H00FFFFFF', titleOutline, 2),
+    style_('Sub', layout.subSize, '&H00FFFFFF', layout.subOutline ?? 5, 8),
+    style_('Credit', layout.creditSize, creditColour, creditOutline, 8),
+    '',
+    '[Events]',
+    'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
+    ...events,
+    '',
+  ].join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Music
+// ---------------------------------------------------------------------------
+
+export const AUDIO_FILE = /\.(?:mp3|m4a|aac|wav|ogg|opus|flac)$/i;
+
+/** Tracks in the music folder, in a stable order. */
+export async function listTracks(dir) {
+  try {
+    return (await readdir(dir))
+      .filter((name) => AUDIO_FILE.test(name))
+      .sort()
+      .map((name) => join(dir, name));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Where in a track to start, so the same song does not always open the same
+ * way. Stays clear of the last couple of seconds, so the bed never runs out
+ * before the clip does.
+ */
+export function trackStart(seed, trackSeconds, clipSeconds) {
+  const room = Math.floor((Number(trackSeconds) || 0) - (Number(clipSeconds) || 0) - 2);
+  return room > 0 ? seed % room : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -246,14 +650,13 @@ export function escapeFilterPath(path) {
 
 /**
  * The full argument list for one short. Pure, so the graph can be tested.
- * `creditPath` may be null, in which case no credit line is drawn.
+ * `music` is {path, start, volume} or null.
  */
 export function shortformArgs({
   input,
   output,
-  captionPath,
-  creditPath = null,
-  font,
+  assPath,
+  fontsDir,
   hasAudio = true,
   width = 1080,
   height = 1920,
@@ -261,65 +664,57 @@ export function shortformArgs({
   style = 'reel',
   sourceWidth = 1920,
   sourceHeight = 1080,
+  duration = 30,
+  music = null,
+  cam = null,
+  trim = null,
 }) {
-  const fontfile = escapeFilterPath(font);
-  const text = (path) => `drawtext=fontfile=${fontfile}:textfile=${escapeFilterPath(path)}:expansion=none`;
-
-  let base;
-  let title;
-  let credit = '';
-
-  if (style === 'blur') {
-    const titleSize = Math.round(width * 0.07);
-    const outline = Math.max(2, Math.round(width * 0.0065));
-    base = verticalFilter({ width, height });
-    // The title sits in the middle of the blurred band above the picture,
-    // clear of the "Following | For You" strip at the very top. The credit
-    // sits just under the picture, above the description overlay.
-    title =
-      `${text(captionPath)}:text_align=C:fontsize=${titleSize}:fontcolor=white` +
-      `:borderw=${outline}:bordercolor=black:line_spacing=${Math.round(titleSize * 0.14)}` +
-      `:x=(w-text_w)/2:y=h*0.17-text_h/2`;
-    if (creditPath) {
-      credit =
-        `,${text(creditPath)}:fontsize=${Math.round(width * 0.041)}:fontcolor=white` +
-        `:borderw=${Math.max(2, outline - 2)}:bordercolor=black:x=(w-text_w)/2:y=h*0.70`;
-    }
+  const box = pictureBox({ width, height, sourceWidth, sourceHeight });
+  const text = `subtitles=filename=${escapeFilterPath(assPath)}:fontsdir=${escapeFilterPath(fontsDir)}`;
+  let chains;
+  if (cam) {
+    const layout = camLayout({ width, height, sourceWidth, sourceHeight, camH: cam.outH });
+    chains = [
+      '[0:v]split=2[c][g]',
+      `[c]crop=${cam.w}:${cam.h}:${cam.x}:${cam.y},scale=${width}:${cam.outH},setsar=1[cam]`,
+      `[g]scale=${width}:${box.pictureH},setsar=1[game]`,
+      `[cam][game]vstack=inputs=2,pad=${width}:${height}:0:${layout.camTop}:color=black,${text}[v]`,
+    ];
   } else {
-    // The reel: the full frame across the middle of a black canvas, the hook
-    // sitting directly on top of the picture and the credit directly under
-    // it. Anchoring both to the picture's edges needs the picture's height,
-    // which is why the source is probed first; a guess would float the text
-    // off the frame for anything that is not exactly 16:9.
-    const aspect =
-      sourceWidth > 0 && sourceHeight > 0 ? sourceHeight / sourceWidth : 9 / 16;
-    const pictureH = Math.min(height, Math.round((width * aspect) / 2) * 2);
-    const pictureTop = Math.floor((height - pictureH) / 4) * 2;
-    const gap = Math.round(height * 0.025);
-    const titleSize = Math.round(width * 0.062);
-
-    base = `scale=${width}:${pictureH},pad=${width}:${height}:0:${pictureTop}:color=black,setsar=1`;
-    title =
-      `${text(captionPath)}:text_align=C:fontsize=${titleSize}:fontcolor=white` +
-      `:line_spacing=${Math.round(titleSize * 0.16)}:x=(w-text_w)/2:y=${pictureTop - gap}-text_h`;
-    if (creditPath) {
-      credit =
-        `,${text(creditPath)}:fontsize=${Math.round(width * 0.037)}:fontcolor=0xBDBDBD` +
-        `:x=(w-text_w)/2:y=${pictureTop + pictureH + gap}`;
-    }
+    const base =
+      style === 'blur'
+        ? verticalFilter({ width, height })
+        : `scale=${width}:${box.pictureH},pad=${width}:${height}:0:${box.pictureTop}:color=black,setsar=1`;
+    chains = [`[0:v]${base},${text}[v]`];
   }
+  // A redo renders a window of a wider cut: seek and limit the input itself.
+  const inputs = trim
+    ? ['-ss', String(trim.start), '-t', String(trim.duration), '-i', input]
+    : ['-i', input];
+  const finish = `loudnorm=I=${loudness}:TP=-1.5:LRA=11,aresample=48000`;
 
-  const chains = [`[0:v]${base}[base]`, `[base]${title}${credit}[v]`];
-  // loudnorm works internally at 192 kHz and hands that rate on unless told
-  // otherwise, which some players and upload pipelines reject outright.
-  if (hasAudio) chains.push(`[0:a]loudnorm=I=${loudness}:TP=-1.5:LRA=11,aresample=48000[a]`);
+  if (hasAudio && music) {
+    // Looped, so a track shorter than the clip still covers it.
+    inputs.push('-stream_loop', '-1', '-ss', String(Math.max(0, Math.floor(music.start || 0))), '-i', music.path);
+    const fadeOut = Math.max(0, duration - 1.5).toFixed(2);
+    chains.push(
+      '[0:a]aresample=48000,asplit=2[voice][key]',
+      `[1:a]aresample=48000,volume=${music.volume},afade=t=in:d=1,afade=t=out:st=${fadeOut}:d=1.5[bed]`,
+      // Ducking: the music drops further whenever the streamer talks.
+      '[bed][key]sidechaincompress=threshold=0.04:ratio=6:attack=20:release=400[ducked]',
+      `[voice][ducked]amix=inputs=2:duration=first:normalize=0,${finish}[a]`,
+    );
+  } else if (hasAudio) {
+    // loudnorm works internally at 192 kHz and hands that rate on unless told
+    // otherwise, which some players and upload pipelines reject outright.
+    chains.push(`[0:a]${finish}[a]`);
+  }
 
   return [
     '-hide_banner',
     '-nostdin',
     '-y',
-    '-i',
-    input,
+    ...inputs,
     '-filter_complex',
     chains.join(';'),
     '-map',
@@ -335,109 +730,108 @@ export function shortformArgs({
     'yuv420p',
     '-movflags',
     '+faststart',
+    '-shortest',
     output,
   ];
 }
 
-/** Whether the cut has audio, and the picture's size, in one probe. */
-async function probeSource(input) {
+/** Audio, picture size and length, in one probe. */
+export async function probe(input) {
   try {
     const { stdout } = await run(
       'ffprobe',
-      ['-v', 'error', '-show_entries', 'stream=codec_type,width,height', '-of', 'json', input],
+      ['-v', 'error', '-show_entries', 'stream=codec_type,width,height:format=duration', '-of', 'json', input],
       { cwd: config.root, label: 'ffprobe' },
     );
-    const streams = JSON.parse(stdout).streams || [];
+    const data = JSON.parse(stdout);
+    const streams = data.streams || [];
     const video = streams.find((stream) => stream.codec_type === 'video') || {};
     return {
       hasAudio: streams.some((stream) => stream.codec_type === 'audio'),
       width: Number(video.width) || 1920,
       height: Number(video.height) || 1080,
+      duration: Number(data.format?.duration) || 30,
     };
   } catch {
     // Let ffmpeg give the real error if the file is unreadable.
-    return { hasAudio: true, width: 1920, height: 1080 };
+    return { hasAudio: true, width: 1920, height: 1080, duration: 30 };
   }
 }
 
+// The English-only model does not refuse other languages: it invents
+// plausible English, quietly. Measured mean word confidence on live streams:
+// five English streamers 0.70 to 0.82; Spanish 0.50 ("I don't know what to
+// say, is that real?" — not what was said), German 0.45, another 0.26 over
+// 79 invented words. 0.6 sits in the clean gap between them.
+export const MIN_SPEECH_CONFIDENCE = 0.6;
+
 /**
- * Render a captioned 9:16 short from a landscape cut, and write the post copy
- * beside it. Returns {path, textPath, caption}.
+ * Whether a transcript is the streamer's words or the model's guess. Below the
+ * line, a short keeps its hook title but gets no subtitles and no quote:
+ * nothing beats burning a confident mistranslation into someone's clip.
  */
-export async function renderShort({
-  input,
-  output,
-  moment,
-  start = 0,
-  workDir = dirname(input),
-  onProgress = () => {},
-  settings = shortformConfig(),
-}) {
-  if (!existsSync(settings.font)) {
-    throw new Error(`caption font not found at ${settings.font} — set SHORTS_FONT to a .ttf file`);
-  }
+export function transcriptUsable(words) {
+  const scored = (words || []).filter((w) => Number.isFinite(w?.probability));
+  if (!scored.length) return { usable: Boolean(words?.length), confidence: null };
+  const confidence = scored.reduce((n, w) => n + w.probability, 0) / scored.length;
+  return { usable: confidence >= MIN_SPEECH_CONFIDENCE, confidence };
+}
 
-  const caption = captionFor(moment);
-  const credit = creditFor(moment);
-  const stem = basename(output, extname(output));
+/** Timed words from src/transcribe.py, or a thrown, readable reason why not. */
+export async function transcribe(input, { python = 'python', speechModel = 'base.en' } = {}) {
+  const { file, prefix } = splitCommand(python);
+  const { stdout } = await run(file, [...prefix, join(config.root, 'src', 'transcribe.py'), input, speechModel], {
+    cwd: config.root,
+    label: 'transcribe',
+  });
+  const last = stdout.trim().split(/\r?\n/).pop() || '{}';
+  const data = JSON.parse(last);
+  if (data.error) throw new Error(data.error);
+  return data;
+}
 
-  await mkdir(dirname(output), { recursive: true });
-  await mkdir(workDir, { recursive: true });
+/**
+ * The webcam's rectangle in the cut, from src/facecam.py, or null when there
+ * is none (or no way to tell — then the plain layout is the safe choice).
+ */
+export async function detectFacecam(input, { python = 'python' } = {}) {
+  const { file, prefix } = splitCommand(python);
+  const { stdout } = await run(file, [...prefix, join(config.root, 'src', 'facecam.py'), input], {
+    cwd: config.root,
+    label: 'facecam',
+  });
+  const data = JSON.parse(stdout.trim().split(/\r?\n/).pop() || '{}');
+  return data.found ? { x: data.x, y: data.y, w: data.w, h: data.h } : null;
+}
 
-  // Written beside the source, not the output, so nothing half-made ever
-  // appears in the folder someone is picking finished posts out of.
-  const captionPath = join(workDir, `${stem}.caption.txt`);
-  const creditPath = credit ? join(workDir, `${stem}.credit.txt`) : null;
-  // The reel's hook lines run to about twenty characters; the blur style's
-  // heavier, outlined face needs a shorter line to clear the side buttons.
-  const maxChars = settings.style === 'blur' ? 16 : 20;
-  await writeFile(captionPath, wrapCaption(caption, { maxChars }).join('\n'), 'utf8');
-  if (creditPath) await writeFile(creditPath, credit, 'utf8');
-
-  // Rendered beside the source and moved into place only once complete. A
-  // stopped process would otherwise leave a truncated mp4 in the ready folder,
-  // which is exactly the folder someone picks files to post from.
-  const partial = join(workDir, `${stem}.rendering.mp4`);
-  const partialText = join(workDir, `${stem}.rendering.txt`);
-
+/**
+ * What was said in a cut, already judged: words if the transcript is the
+ * streamer's, null with a reason if it is missing or a guess.
+ */
+export async function speechIn(input, settings = shortformConfig()) {
+  if (!settings.subtitles) return { words: null, speechError: null };
+  let words;
   try {
-    const source = await probeSource(input);
-    const args = shortformArgs({
-      input,
-      output: partial,
-      captionPath,
-      creditPath,
-      font: settings.font,
-      hasAudio: source.hasAudio,
-      loudness: settings.loudness,
-      style: settings.style,
-      sourceWidth: source.width,
-      sourceHeight: source.height,
-    });
-    onProgress({ stage: 'short', percent: 0, message: 'rendering short' });
-    await run('ffmpeg', args, {
-      cwd: config.root,
-      label: 'ffmpeg',
-      onLine: (line) => {
-        const match = /time=(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(line);
-        if (match) {
-          const seconds = Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
-          onProgress({ stage: 'short', seconds, message: `rendering short ${formatClipTimestamp(seconds)}` });
-        }
-      },
-    });
-    await writeFile(partialText, postTextFor(moment, { caption, start, hashtags: settings.hashtags }), 'utf8');
-
-    const textPath = join(dirname(output), `${stem}.txt`);
-    await moveInto(partial, output);
-    await moveInto(partialText, textPath);
-    return { path: output, textPath, caption };
-  } finally {
-    await rm(captionPath, { force: true });
-    if (creditPath) await rm(creditPath, { force: true });
-    await rm(partial, { force: true });
-    await rm(partialText, { force: true });
+    words = (await transcribe(input, settings)).words || [];
+  } catch (err) {
+    return { words: null, speechError: String(err.message).split(/\r?\n/)[0] };
   }
+  const check = transcriptUsable(words);
+  if (words.length && !check.usable) {
+    return {
+      words: null,
+      speechError: `speech too unclear to subtitle (confidence ${check.confidence.toFixed(2)}, probably not English)`,
+    };
+  }
+  return { words, speechError: null };
+}
+
+async function chooseTrack(settings, seed, clipSeconds) {
+  const tracks = await listTracks(settings.musicDir);
+  if (!tracks.length) return null;
+  const path = tracks[seed % tracks.length];
+  const length = (await probe(path)).duration;
+  return { path, start: trackStart(seed, length, clipSeconds), volume: settings.musicVolume };
 }
 
 // rename is atomic on one volume. AUTOCLIP_DIR may point at another drive
@@ -449,5 +843,164 @@ async function moveInto(from, to) {
     if (err.code !== 'EXDEV') throw err;
     await copyFile(from, to);
     await rm(from, { force: true });
+  }
+}
+
+/**
+ * Render a short from a landscape cut, and write its post copy beside it.
+ *
+ * `reactionAt` is how many seconds into the cut people reacted; the title's
+ * quote is looked for just before it. `avoid` is recent titles not to repeat.
+ * Returns {path, textPath, caption, words, speechError, track}.
+ */
+export async function renderShort({
+  input,
+  output,
+  moment,
+  start = 0,
+  reactionAt = 25,
+  workDir = dirname(input),
+  onProgress = () => {},
+  settings = shortformConfig(),
+  avoid = [],
+  music = false,
+  // Already transcribed and judged (by the reviewer): skip doing it again.
+  // `undefined` means "not done yet", null means "nothing usable".
+  words: given = undefined,
+  speechError: givenError = null,
+  // A window of a wider cut, for a redo: {start, duration} in seconds.
+  trim = null,
+}) {
+  const stem = basename(output, extname(output));
+  await mkdir(dirname(output), { recursive: true });
+  await mkdir(workDir, { recursive: true });
+
+  const source = await probe(input);
+  const length = trim ? Math.min(trim.duration, source.duration - trim.start) : source.duration;
+
+  // What was said: for the subtitles, and for a title about what happened.
+  let words = given ?? null;
+  let speechError = givenError;
+  if (given === undefined && source.hasAudio) {
+    onProgress({ stage: 'short', percent: 0, message: 'transcribing' });
+    ({ words, speechError } = await speechIn(input, settings));
+  }
+
+  // The streamer's camera on top, when there is one to find.
+  let cam = null;
+  if (settings.facecam) {
+    onProgress({ stage: 'short', percent: 0, message: 'looking for the webcam' });
+    try {
+      cam = fitCam(await detectFacecam(input, settings));
+    } catch {
+      cam = null; // no camera found is a layout choice, never a failed short
+    }
+  }
+
+  const caption = titleFor(moment, { words, reactionAt, avoid, mild: settings.censor });
+  const chunks = words ? subtitleChunks(words, { mild: settings.censor }) : [];
+  const layout = layoutFor({
+    style: settings.style,
+    sourceWidth: source.width,
+    sourceHeight: source.height,
+    subtitles: chunks.length > 0,
+    camH: cam?.outH || 0,
+  });
+
+  // Written beside the source, never in the ready folder, so nothing half-made
+  // ever appears where someone picks finished posts out.
+  const assPath = join(workDir, `${stem}.ass`);
+  const partial = join(workDir, `${stem}.rendering.mp4`);
+  await writeFile(
+    assPath,
+    buildAss({
+      layout,
+      style: settings.style,
+      titleLines: wrapCaption(caption, {
+        maxChars: settings.style === 'blur' ? 16 : 20,
+        maxLines: layout.titleLines ?? 3,
+      }),
+      credit: creditFor(moment),
+      chunks,
+      fontName: settings.fontName,
+    }),
+    'utf8',
+  );
+
+  const track = music && source.hasAudio ? await chooseTrack(settings, hashOf(moment?.id || stem), length) : null;
+
+  const render = () =>
+    run(
+      'ffmpeg',
+      shortformArgs({
+        input,
+        output: partial,
+        assPath,
+        fontsDir: settings.fontsDir,
+        hasAudio: source.hasAudio,
+        loudness: settings.loudness,
+        style: settings.style,
+        sourceWidth: source.width,
+        sourceHeight: source.height,
+        duration: length,
+        music: track,
+        cam,
+        trim,
+      }),
+      {
+        cwd: config.root,
+        label: 'ffmpeg',
+        onLine: (line) => {
+          const match = /time=(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(line);
+          if (match) {
+            const seconds = Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+            onProgress({ stage: 'short', seconds, message: `rendering short ${formatClipTimestamp(seconds)}` });
+          }
+        },
+      },
+    );
+
+  try {
+    onProgress({ stage: 'short', percent: 0, message: 'rendering short' });
+    // Checked before it can reach the ready folder. A fault in the file is
+    // rendered once more; a fault in the footage is not worth repeating.
+    let checks = null;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      await render();
+      checks = await validateShort(partial, { expectSeconds: length, hasAudio: source.hasAudio });
+      if (checks.ok) break;
+      if (!checks.retry || attempt === 2) {
+        throw new Error(`the finished short failed its checks: ${checks.problems.map((p) => p.text).join('; ')}`);
+      }
+      onProgress({ stage: 'short', percent: 0, message: 'failed its checks, rendering again' });
+    }
+
+    // The post copy, as plain text to read and as parts for the panel's
+    // platform buttons, written before the video moves so the panel never
+    // sees a short without its copy.
+    const parts = postPartsFor(moment, { caption, start, hashtags: settings.hashtags });
+    const textPath = join(dirname(output), `${stem}.txt`);
+    await writeFile(join(workDir, `${stem}.rendering.txt`), postTextFor(moment, { caption, start, hashtags: settings.hashtags }), 'utf8');
+    await writeFile(join(workDir, `${stem}.rendering.json`), `${JSON.stringify(parts, null, 2)}\n`, 'utf8');
+    await moveInto(join(workDir, `${stem}.rendering.txt`), textPath);
+    await moveInto(join(workDir, `${stem}.rendering.json`), join(dirname(output), `${stem}.json`));
+    await moveInto(partial, output);
+
+    return {
+      path: output,
+      textPath,
+      caption,
+      words: words ? words.length : null,
+      speechError,
+      track: track ? basename(track.path) : null,
+      cam: Boolean(cam),
+      checked: checks.ok,
+      duration: checks.duration,
+    };
+  } finally {
+    await rm(assPath, { force: true });
+    await rm(partial, { force: true });
+    await rm(join(workDir, `${stem}.rendering.txt`), { force: true });
+    await rm(join(workDir, `${stem}.rendering.json`), { force: true });
   }
 }

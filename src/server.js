@@ -8,6 +8,7 @@ import { clipQueueStatus, enqueueClip, getClipJob, publicJob } from './clipjobs.
 import { config, credentialsMissing, nothingToRun, root } from './config.js';
 import { Automation, SHORT_FILE, parseRange } from './automation.js';
 import { Feed } from './feed.js';
+import { acquireLock, lockMessage } from './lock.js';
 
 // Enough for the biggest plausible clip request and nothing like enough to be
 // worth sending as a denial-of-service payload.
@@ -23,6 +24,15 @@ const TYPES = {
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
 };
+
+// One copy at a time: see lock.js for what happened when there were three.
+const LOCK_PATH = join(root, 'data', 'app.lock');
+const lock = acquireLock(LOCK_PATH, { name: 'npm start' });
+if (!lock.ok) {
+  console.error(`\n  ${lockMessage(lock.holder, LOCK_PATH)}\n`);
+  process.exit(1);
+}
+process.on('exit', () => lock.release());
 
 const feed = new Feed();
 const automation = new Automation({ feed, log: (message) => feed.log(message) });
@@ -232,6 +242,18 @@ const server = createServer(async (req, res) => {
       return;
     }
     sendJson(res, 200, await automation.view());
+    return;
+  }
+
+  // POST /api/shorts/<file>/reveal  -> opens the folder with the short selected
+  const reveal = /^\/api\/shorts\/([^/]+)\/reveal$/.exec(url.pathname);
+  if (reveal && req.method === 'POST') {
+    try {
+      automation.reveal(decodeURIComponent(reveal[1]));
+      sendJson(res, 200, { ok: true });
+    } catch (err) {
+      sendJson(res, 404, { error: 'not_found', message: err.message });
+    }
     return;
   }
 

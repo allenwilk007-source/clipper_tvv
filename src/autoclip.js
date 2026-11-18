@@ -46,14 +46,23 @@ export function autoclipConfig(source = process.env) {
   return {
     // Empty means every channel the feed sees. The automation panel fills it.
     channels: [],
+    // Only these games are clipped. A moment whose game cannot be told is
+    // skipped rather than guessed: the first live test without this cut World
+    // of Warcraft and tagged it #gta6.
+    games: [...config.games],
     minScore: num(source.AUTOCLIP_MIN_SCORE, 0),
     states: String(source.AUTOCLIP_STATES ?? 'early,fresh')
       .split(',')
       .map((state) => state.trim())
       .filter(Boolean),
-    perHour: num(source.AUTOCLIP_PER_HOUR, 6),
-    perChannelPerHour: num(source.AUTOCLIP_PER_CHANNEL_PER_HOUR, 2),
-    maxPerPoll: num(source.AUTOCLIP_MAX_PER_POLL, 2),
+    // Volume. This caps how many, not how hard the machine works: that is the
+    // two-renders-at-once limit. Two jobs at 40-90s each (cut, review,
+    // render, checks) leave room for 60 an hour. Raised from 30 after live
+    // runs hit 30 inside the hour. The per-channel cap keeps one hot streamer
+    // from being the whole folder.
+    perHour: num(source.AUTOCLIP_PER_HOUR, 60),
+    perChannelPerHour: num(source.AUTOCLIP_PER_CHANNEL_PER_HOUR, 6),
+    maxPerPoll: num(source.AUTOCLIP_MAX_PER_POLL, 4),
     settleSeconds: num(source.AUTOCLIP_SETTLE_SECONDS, 30),
     maxAgeMinutes: num(source.AUTOCLIP_MAX_AGE_MINUTES, 20),
     dedupeSeconds: num(source.AUTOCLIP_DEDUPE_SECONDS, 45),
@@ -107,6 +116,7 @@ export function selectForAutoclip(moments, { now = Date.now(), cuts = [], cfg = 
   const recent = cuts.filter((cut) => now - cut.at < HOUR);
   const ids = new Set(cuts.map((cut) => cut.momentId));
   const channels = new Set((cfg.channels || []).map(who));
+  const games = new Set((cfg.games || []).map(who));
 
   const ranked = [...moments].sort((a, b) => (b.opportunity ?? 0) - (a.opportunity ?? 0));
 
@@ -117,6 +127,8 @@ export function selectForAutoclip(moments, { now = Date.now(), cuts = [], cfg = 
     const takenRecently = [...recent, ...picks.map((pick) => toCut(pick, now))];
 
     if (channels.size && !channels.has(momentLogin(moment))) skip('not-automated');
+    else if (games.size && !moment.game) skip('unknown-game');
+    else if (games.size && !games.has(who(moment.game))) skip('other-game');
     else if (!moment.vodId) skip('no-vod');
     else if (offset == null) skip('no-offset');
     else if (!cfg.states.includes(moment.state)) skip('state');
@@ -154,6 +166,7 @@ const snapshotOf = (moment) => ({
   broadcaster: moment.broadcaster,
   vodId: moment.vodId,
   title: moment.title,
+  game: moment.game || null,
   chat: moment.chat ? { classes: moment.chat.classes } : null,
 });
 
@@ -173,6 +186,21 @@ export class AutoClipper {
     this.cuts = [];
     this.totals = { queued: 0, done: 0, failed: 0 };
     this.lastSkipped = {};
+    // Titles already used, so the next one is different. Loaded from the
+    // store, so a restart does not start repeating itself.
+    this.recentCaptions = [];
+    this.music = false;
+  }
+
+  /** Background music on or off, for shorts queued from now. */
+  setMusic(on) {
+    this.music = Boolean(on);
+  }
+
+  rememberCaption(caption) {
+    if (!caption) return;
+    this.recentCaptions.push(caption);
+    if (this.recentCaptions.length > 80) this.recentCaptions.splice(0, this.recentCaptions.length - 80);
   }
 
   /** Which channels to clip. Empty means every channel the feed sees. */
@@ -191,6 +219,7 @@ export class AutoClipper {
     this.cuts = this.store
       .recentAutoclips({ since: this.now() - 24 * HOUR })
       .map((row) => ({ ...row, at: Date.parse(row.createdAt) }));
+    for (const row of this.store.listAutoclips({ limit: 80 }).reverse()) this.rememberCaption(row.caption);
     return this.cuts.length;
   }
 
@@ -203,7 +232,8 @@ export class AutoClipper {
   }
 
   cut(moment, now) {
-    const caption = captionFor(moment);
+    // Provisional: the render replaces it with one about what was said.
+    const caption = captionFor(moment, { avoid: this.recentCaptions });
     const cut = toCut(moment, now);
 
     // Claimed BEFORE it is queued. If the process dies mid-render the row
@@ -227,7 +257,13 @@ export class AutoClipper {
       broadcaster: moment.broadcaster,
       momentId: moment.id,
       dir: this.cfg.workDir,
-      short: { dir: this.cfg.dir, moment: snapshotOf(moment), auto: true },
+      short: {
+        dir: this.cfg.dir,
+        moment: snapshotOf(moment),
+        auto: true,
+        avoid: [...this.recentCaptions, caption],
+        music: this.music,
+      },
       onSettled: (job) => this.settled(moment, job),
     });
   }
@@ -235,18 +271,24 @@ export class AutoClipper {
   settled(moment, job) {
     const ok = job.state === 'done';
     this.totals[ok ? 'done' : 'failed'] += 1;
+    if (ok) this.rememberCaption(job.caption);
+    // No subtitles is a degraded short, not a failed one — but worth saying.
+    if (ok && job.speechError) this.log(`autocollect: no subtitles for ${moment.broadcaster}: ${job.speechError}`);
     try {
       this.store?.finishAutoclip(moment.id, {
         status: ok ? 'done' : 'failed',
         path: job.shortPath,
         error: ok ? null : job.message,
+        caption: ok ? job.caption : null,
+        review: job.review || null,
       });
     } catch (err) {
       this.log(`autocollect: could not record the result for ${moment.id}: ${err.message}`);
     }
     this.log(
       ok
-        ? `autocollect: ready -> ${relative(root, job.shortPath)}`
+        ? `autocollect: ready -> ${relative(root, job.shortPath)} — "${job.caption}"` +
+            (job.review ? ` · score ${job.review.score}${job.review.redone ? ` (re-cut from ${job.review.before})` : ''}${job.review.weak ? ' · WEAK' : ''}` : '')
         : `autocollect: ${moment.broadcaster} failed — ${job.message}`,
     );
   }

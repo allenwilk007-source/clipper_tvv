@@ -8,14 +8,24 @@
 // instead of `npm start`, not beside it: each starts its own feed, and two
 // feeds spend the Twitch rate limit — and the chat sockets — twice.
 
-import { relative } from 'node:path';
+import { join, relative } from 'node:path';
 
 import { credentialsMissing, root } from './config.js';
 import { Automation } from './automation.js';
 import { clipQueueStatus } from './clipjobs.js';
 import { Feed } from './feed.js';
+import { acquireLock, lockMessage } from './lock.js';
 
 const SUMMARY_MS = 10 * 60_000;
+
+// One copy at a time: see lock.js for what happened when there were three.
+const LOCK_PATH = join(root, 'data', 'app.lock');
+const lock = acquireLock(LOCK_PATH, { name: 'npm run auto' });
+if (!lock.ok) {
+  console.error(`\n  ${lockMessage(lock.holder, LOCK_PATH)}\n`);
+  process.exit(1);
+}
+process.on('exit', () => lock.release());
 
 const feed = new Feed();
 const automation = new Automation({ feed, log: feed.log });

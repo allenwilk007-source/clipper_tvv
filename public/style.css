@@ -689,7 +689,8 @@ select {
   text-align: center;
 }
 
-.short.is-failed .short-placeholder {
+.short.is-failed .short-placeholder,
+.short.is-rejected .short-placeholder {
   color: var(--danger);
 }
 
@@ -752,4 +753,134 @@ select {
   .shorts {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+}
+
+/* ---------- automation options and posting ---------- */
+
+.auto-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  align-items: center;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.auto-games {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.switch-small .switch-track {
+  width: 32px;
+  height: 18px;
+}
+
+.switch-small .switch-thumb {
+  width: 12px;
+  height: 12px;
+}
+
+.switch-small input:checked + .switch-track .switch-thumb {
+  transform: translateX(14px);
+}
+
+.switch-small .switch-label {
+  min-width: 0;
+  color: var(--text);
+  font-weight: 500;
+}
+
+.auto-scope select {
+  margin-left: 6px;
+}
+
+.short-post {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.post-btn {
+  padding: 6px 4px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 18%, var(--panel));
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.post-btn:hover {
+  background: color-mix(in srgb, var(--accent) 35%, var(--panel));
+}
+
+.post-btn.is-done {
+  border-color: var(--fresh);
+  background: color-mix(in srgb, var(--fresh) 14%, var(--panel));
+}
+
+.post-btn.is-done::after {
+  content: " ✓";
+}
+
+.short-hint {
+  margin: 4px 0 0;
+  color: var(--fresh);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+/* ---------- engagement meter ---------- */
+
+/* `display: flex` would otherwise override [hidden], and an unscored short
+   would show an empty meter at 100% - which reads as a perfect score. */
+.short-meter[hidden] {
+  display: none;
+}
+
+.short-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 2px;
+}
+
+.meter-bar {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--warm);
+}
+
+.short.is-strong .meter-fill {
+  background: var(--fresh);
+}
+
+.short.is-weak .meter-fill {
+  background: var(--danger);
+}
+
+.meter-text {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.short.is-weak {
+  opacity: 0.6;
+}
+
+.short.is-weak .meter-text {
+  color: var(--danger);
 }

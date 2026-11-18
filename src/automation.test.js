@@ -56,14 +56,24 @@ test('the panel adds, removes and switches, and says why when it cannot', () => 
 });
 
 test('saved settings are cleaned on the way back in', () => {
-  const fallback = { enabled: false, channels: ['xqc'] };
-  assert.deepEqual(sanitizeSettings({ enabled: true, channels: ['Lirik', 'bad name', 'lirik'] }, fallback), {
-    enabled: true,
-    channels: ['lirik'],
-  });
+  const fallback = { enabled: false, channels: ['xqc'], music: false, scope: 'channels' };
+  assert.deepEqual(
+    sanitizeSettings({ enabled: true, channels: ['Lirik', 'bad name', 'lirik'], music: true, scope: 'category' }, fallback),
+    { enabled: true, channels: ['lirik'], music: true, scope: 'category' },
+  );
   // A missing or broken file falls back rather than throwing.
   assert.deepEqual(sanitizeSettings(null, fallback), fallback);
-  assert.deepEqual(sanitizeSettings({ enabled: 'on' }, fallback), fallback);
+  assert.deepEqual(sanitizeSettings({ enabled: 'on', music: 'yes', scope: 'everything' }, fallback), fallback);
+});
+
+test('music and where to clip from are switched from the panel too', () => {
+  const start = { enabled: true, channels: ['xqc'], music: false, scope: 'channels' };
+  assert.equal(applyChange(start, { music: true }).music, true);
+  assert.equal(applyChange(start, { scope: 'category' }).scope, 'category');
+  assert.throws(() => applyChange(start, { music: 'loud' }), /true or false/);
+  assert.throws(() => applyChange(start, { scope: 'everything' }), /scope must be one of/);
+  // Room for both games' worth of channels.
+  assert.equal(MAX_CHANNELS, 100);
 });
 
 test('/shorts/ serves only the names the renderer makes', () => {

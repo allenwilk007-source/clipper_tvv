@@ -10,6 +10,8 @@
 //
 // The second number is the one nothing else in the market shows.
 
+import { gameAt } from './archive.js';
+
 const round = (value, places = 2) => {
   const factor = 10 ** places;
   return Math.round(value * factor) / factor;
@@ -74,6 +76,7 @@ function buildMoment(clips, basis) {
     // bookkeeping, not something the page renders.
     clipIds: clips.map((c) => c.id).filter(Boolean),
     vodId: first.video_id || null,
+    gameId: first.game_id || null,
     offsetSeconds,
     reactionOffsetSeconds,
     saturation: clips.length,
@@ -195,6 +198,9 @@ export function chatCandidateMoments(candidates, { channels = new Map() } = {}) 
       offsetSeconds,
       // The chat peak already is the reaction, so no correction applies.
       reactionOffsetSeconds: offsetSeconds,
+      // Read off the recording's chapters at the moment's own second, so a
+      // streamer who switched games an hour ago is judged on the game now.
+      game: gameAt(channel?.chapters, offsetSeconds) ?? channel?.game ?? null,
       offsetEstimated: true,
       saturation: 0,
       uniqueClippers: 0,
