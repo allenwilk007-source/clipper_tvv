@@ -39,16 +39,43 @@ the short is?
 - The same for the meter's own `burst` against (2), for comparison.
 - Reported in full **whatever the result**, null included.
 
+## What the sample can and cannot show
+
+Every short in the sample is a moment automation chose to cut, so every one
+has already passed the chat ranking. The test can therefore answer only:
+**among moments good enough to cut, does `audioBurst` predict which are
+better?** It cannot show whether `audioBurst` should help decide which
+moments get cut at all: no moment chat ranked low is in the sample, and
+those are exactly the ones a selection rule would newly promote or demote.
+(Raised by the detection session before collection began.)
+
 ## Decision, declared now
 
-`audioBurst` enters the ranking only if its correlation with the reviewer's
-ratings is at least **0.3** with a 95% interval that **excludes zero**.
+If its correlation with the reviewer's ratings is at least **0.3**, with a
+95% interval that **excludes zero**, `audioBurst` may be used to **re-order
+moments that have already passed every other rule**: which of the eligible
+moments are cut first when a cap bites. It may **not** be used to admit or
+exclude moments. That needs a separate test, declared in advance, with a
+control arm cut from below the line, so the correlation is measured across
+the whole range a selection rule would act on.
+
 Otherwise it stays out, and no subgroup or alternative cut of the same 60
 is used to revive it; a new hypothesis needs a new sample.
 
-If it does enter, it goes in as a modest term, and only once detection
-probes enough moments that ranking on it does not simply reward having been
-measured.
+## Reading the result
+
+- **Range restriction.** The sample covers only moments that cleared the
+  ranking, which narrows the spread of both variables and pulls the
+  correlation toward zero. A result just under 0.3 is weaker evidence
+  against the hypothesis than it looks, and is to be reported as
+  inconclusive, not as a clean null.
+- **The outcome is a stand-in.** A reviewer rating a clip and a meter
+  scoring it can both respond to loudness directly: a loud clip feels
+  exciting to anything that listens to it. A positive result shows that
+  `audioBurst` predicts what a rater thinks of a clip, not that the clip
+  performs. It is not to be cited as "audio predicts good clips" without
+  that qualifier. What settles performance is views, which needs
+  credentials and posting.
 
 ## Also on record
 
