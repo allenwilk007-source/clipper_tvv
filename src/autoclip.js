@@ -78,13 +78,18 @@ export function autoclipConfig(source = process.env) {
  * How much to cut either side of the offset, by where the offset came from.
  *
  * The default 25s before and 5s after is built for a CHAT offset: chat
- * reacts after the thing happens, so the moment sits well before it. An
- * AUDIO offset — set by detection only when the stream's audio peak clears a
- * confidence floor — is the moment itself, about 7s earlier (measured median
- * lag between audio peak and chat). Cutting 25/5 around it would leave only
- * five seconds of aftermath and put the payoff 83% of the way in; 22/8 keeps
- * the reaction and lands the payoff about three quarters in, where the
- * engagement meter's re-centring found it reads best.
+ * reacts after the thing happens, so the moment sits well before it.
+ *
+ * The AUDIO branch is DORMANT, and its numbers have no evidence behind them.
+ * It was added for detection to set reactionOffsetSeconds to the stream's
+ * audio peak when that peak cleared a confidence floor, on a measured ~7s
+ * lead of audio over chat. That lead did not replicate: over 60 moments the
+ * audio peak came first in exactly 50%, and neither burst size nor isolation
+ * gave a usable floor. So detection never sets reactionOffsetSeconds, and
+ * fromAudio below is never true. The branch is kept, tested, in case rated
+ * outcomes ever justify an audio-timed cut — but if it is opened, re-derive
+ * the window from that evidence; do not inherit 22/8, which came from the
+ * 7s that turned out not to exist.
  */
 export const AUDIO_WINDOW = { pre: 22, post: 8 };
 
