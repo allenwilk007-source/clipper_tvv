@@ -21,12 +21,21 @@ const defaultLog = (message) => console.log(`[${stamp()}] ${message}`);
  * moves and each refresh costs several requests.
  */
 export class Feed {
-  constructor({ log = defaultLog } = {}) {
+  /**
+   * `chat` and `watchChannels` exist to be injected. The chat watcher opens
+   * real IRC sockets the moment it is given a channel, so a test of the
+   * chat-only path has to be able to hand in one that does not.
+   */
+  constructor({ log = defaultLog, chat, store, watchChannels } = {}) {
     this.log = log;
     this.twitch = new Twitch({ log });
-    this.chat = config.chatEnabled ? new ChatWatcher({ log }) : null;
+    this.chat =
+      chat !== undefined ? chat : config.chatEnabled ? new ChatWatcher({ log }) : null;
+    this.watchChannels = watchChannels || config.watchChannels;
 
-    this.store = config.storeEnabled ? openStore(config.storePath, { log }) : null;
+    // Injected as null by tests, which must not open the real database.
+    this.store =
+      store !== undefined ? store : config.storeEnabled ? openStore(config.storePath, { log }) : null;
 
     this.game = null;
     this.moments = [];
@@ -51,13 +60,103 @@ export class Feed {
     return this.twitch.configured;
   }
 
+  /**
+   * True when there is no app token, so every Helix call would fail.
+   *
+   * Chat is anonymous and unmetered, which makes it the one signal that still
+   * works in this state — and the only one that can fire before anybody has
+   * clipped. So a missing credential degrades the feed instead of stopping it.
+   */
+  get chatOnly() {
+    return !this.twitch.configured;
+  }
+
   async init() {
     if (this.game) return this.game;
+    if (this.chatOnly) {
+      // No category to resolve: the watch list IS the scope.
+      this.game = { id: null, name: `${this.watchChannels.length} watched channels` };
+      this.log(`no credentials — chat-only on ${this.watchChannels.length} channels`);
+      return this.game;
+    }
     this.game = config.gameId
       ? await this.twitch.gameById(config.gameId)
       : await this.twitch.resolveGame(config.gameName);
     this.log(`watching "${this.game.name}" (id ${this.game.id})`);
     return this.game;
+  }
+
+  /**
+   * Stand in for pollStreams when Helix is unavailable.
+   *
+   * Everything Helix would supply — broadcaster id, stream start, viewers, VOD
+   * id — is genuinely unknown here, and is left null rather than guessed. The
+   * consequences are honest and contained: no VOD timestamp, so deepLink falls
+   * back to the live channel, and no local clip extraction until a VOD exists.
+   */
+  setWatchList(logins = this.watchChannels) {
+    const next = new Map();
+    for (const login of logins) {
+      const key = String(login).toLowerCase();
+      if (!key) continue;
+      next.set(key, {
+        broadcasterId: null,
+        displayName: this.channels.get(key)?.displayName || key,
+        startedAt: null,
+        title: '',
+        viewers: null,
+        vodId: null,
+      });
+    }
+    this.channels = next;
+    this.chat?.setChannels([...next.keys()]);
+    this.lastStreamPoll = new Date().toISOString();
+    return next;
+  }
+
+  /**
+   * One detection pass with chat as the only input.
+   *
+   * Deliberately not a cut-down pollClips: it runs the same
+   * chatCandidateMoments -> scoreMoments path, so a moment found this way is
+   * scored, stored and rendered exactly like any other. The ranking stays
+   * comparable, and the store keeps collecting the longitudinal data the
+   * clipper index needs whether or not a token ever shows up.
+   */
+  async pollChat() {
+    const now = Date.now();
+    const candidates = this.chat ? this.chat.candidates({ now }) : [];
+
+    const scored = scoreMoments(
+      chatCandidateMoments(candidates, { channels: this.channels }),
+      {
+        now,
+        chatSpikes: this.chat ? this.chat.spikes() : new Map(),
+        streams: this.streams,
+        previous: this.previousSaturation,
+        leadInSeconds: config.leadInSeconds,
+      },
+    );
+
+    const nextPrevious = new Map();
+    for (const moment of scored) nextPrevious.set(moment.id, moment.saturation);
+    this.previousSaturation = nextPrevious;
+
+    this.moments = scored;
+    this.clipCount = 0;
+    this.truncated = false;
+    this.lastClipPoll = new Date(now).toISOString();
+    this.lastError = null;
+
+    if (this.store) {
+      try {
+        this.store.recordPoll({ moments: scored, gameId: null, at: new Date(now) });
+      } catch (err) {
+        this.log(`store write failed: ${err.message}`);
+      }
+    }
+
+    return scored;
   }
 
   async pollStreams() {
@@ -225,6 +324,7 @@ export class Feed {
     try {
       if (kind === 'streams') await this.pollStreams();
       else if (kind === 'outcomes') await this.pollOutcomes();
+      else if (kind === 'chat') await this.pollChat();
       else await this.pollClips();
     } catch (err) {
       this.lastError = { at: new Date().toISOString(), message: err.message };
@@ -238,6 +338,16 @@ export class Feed {
 
     await this.init();
     this.chat?.start();
+
+    if (this.chatOnly) {
+      // No stream loop and no outcome loop: both are Helix. Re-polling a clip
+      // that was never fetched would only write empty outcomes and make the
+      // eval look like the ranking failed, when in fact it was never tested.
+      this.setWatchList();
+      await this.tick('chat');
+      this.timers.push(setInterval(() => this.tick('chat'), config.chatPollSeconds * 1000));
+      return;
+    }
 
     await this.tick('streams');
     await this.tick('clips');
@@ -274,10 +384,15 @@ export class Feed {
         clipsScanned: this.clipCount,
         truncated: this.truncated,
         windowMinutes: config.clipWindowMinutes,
+        // Watched is not live: without Helix there is no way to know which of
+        // these channels is actually broadcasting, and chat is quiet either
+        // way, so the two numbers are reported separately.
+        chatOnly: this.chatOnly,
+        watchedChannels: this.channels.size,
         liveChannels: this.streams.size,
         lastClipPoll: this.lastClipPoll,
         lastStreamPoll: this.lastStreamPoll,
-        pollSeconds: config.clipPollSeconds,
+        pollSeconds: this.chatOnly ? config.chatPollSeconds : config.clipPollSeconds,
         chat: this.chat ? this.chat.status() : { enabled: false },
         store: this.store ? this.store.counts() : null,
         lastError: this.lastError,

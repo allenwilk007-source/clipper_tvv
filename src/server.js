@@ -4,7 +4,7 @@ import { extname, join, normalize, sep } from 'node:path';
 
 import { clipWindow, normalizeVodId } from './clip.js';
 import { clipQueueStatus, enqueueClip, getClipJob, publicJob } from './clipjobs.js';
-import { config, credentialsMissing, root } from './config.js';
+import { config, credentialsMissing, nothingToRun, root } from './config.js';
 import { Feed } from './feed.js';
 
 // Enough for the biggest plausible clip request and nothing like enough to be
@@ -98,11 +98,14 @@ const server = createServer(async (req, res) => {
       sendJson(res, 200, demoSnapshot());
       return;
     }
-    if (credentialsMissing) {
+    // Credentials buy clips and saturation. Chat alone still finds moments, so
+    // the feed is only unavailable when there is neither a token nor anybody
+    // on the watch list to listen to.
+    if (nothingToRun) {
       sendJson(res, 503, {
-        error: 'missing_credentials',
+        error: 'nothing_to_watch',
         message:
-          'Set TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET in .env, then restart. See README.',
+          'Add TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET to .env for the full feed, or set WATCH_CHANNELS to run chat-only. Then restart.',
       });
       return;
     }
@@ -170,8 +173,12 @@ const server = createServer(async (req, res) => {
 
   if (url.pathname === '/api/status') {
     sendJson(res, 200, {
-      ok: !credentialsMissing,
+      ok: !nothingToRun,
+      // Chat-only is a working mode, not a broken one. It finds moments and
+      // cannot measure saturation; the caller deserves to know which.
+      mode: credentialsMissing ? 'chat-only' : 'full',
       credentials: credentialsMissing ? 'missing' : 'present',
+      watchedChannels: feed.channels.size,
       game: feed.game ? { id: feed.game.id, name: feed.game.name } : null,
       started: feed.started,
       lastError: feed.lastError,
@@ -186,14 +193,20 @@ const server = createServer(async (req, res) => {
 server.listen(config.port, async () => {
   console.log(`\n  saturation feed  ->  http://localhost:${config.port}\n`);
 
-  if (credentialsMissing) {
-    console.log('  No Twitch credentials yet.');
-    console.log('  1. cp .env.example .env');
-    console.log('  2. add TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET');
-    console.log('     (register an app at https://dev.twitch.tv/console/apps)');
-    console.log('  3. restart\n');
-    console.log('  The page is up and will explain the same thing.\n');
+  if (nothingToRun) {
+    console.log('  Nothing to watch.');
+    console.log('  Add TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET to .env for the full');
+    console.log('  feed (register an app at https://dev.twitch.tv/console/apps), or set');
+    console.log('  WATCH_CHANNELS=name,name to run chat-only.');
+    console.log('');
     return;
+  }
+
+  if (credentialsMissing) {
+    console.log(`  No credentials - chat-only on ${config.watchChannels.length} channels.`);
+    console.log('  Finding moments before anybody clips them is the half that works');
+    console.log('  without a token. Saturation is the half that does not.');
+    console.log('');
   }
 
   try {

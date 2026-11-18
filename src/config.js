@@ -36,6 +36,44 @@ const num = (value, fallback) => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
+// Comma- or space-separated channel logins. An explicitly empty value means
+// "watch nothing", which is different from "unset", so the fallback only
+// applies when the variable is absent altogether.
+const logins = (value, fallback) => {
+  if (value === undefined) return fallback;
+  return [
+    ...new Set(
+      String(value)
+        .split(/[\s,]+/)
+        .map((entry) => entry.trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ];
+};
+
+/**
+ * Who to listen to when there are no credentials.
+ *
+ * Helix is the only way to ask "who is live in this category", so without it
+ * the watch list has to be named. This is a starting point, not a claim about
+ * who will actually play: override it with WATCH_CHANNELS and the whole
+ * chat-only path follows.
+ */
+const DEFAULT_WATCH = [
+  'xqc',
+  'kaicenat',
+  'caseoh_',
+  'jynxzi',
+  'summit1g',
+  'shroud',
+  'lirik',
+  'sodapoppin',
+  'timthetatman',
+  'nickmercs',
+  'tarik',
+  'hasanabi',
+];
+
 export const config = {
   root,
   port: num(process.env.PORT, 3000),
@@ -57,6 +95,12 @@ export const config = {
   chatFloorMessages: num(process.env.CHAT_FLOOR_MESSAGES, 8),
   chatMinRise: num(process.env.CHAT_MIN_RISE, 1.5),
   chatSpikeZ: num(process.env.CHAT_SPIKE_Z, 3),
+  // Chat-only mode. Chat needs no token, so detection can run with an empty
+  // .env — but only against channels named here. Polled faster than the clip
+  // loop because a bucket closes every ten seconds and being first is the
+  // entire point of this path.
+  watchChannels: logins(process.env.WATCH_CHANNELS, DEFAULT_WATCH),
+  chatPollSeconds: num(process.env.CHAT_POLL_SECONDS, 10),
 
   // Persistence. The point is not durability, it's having a label to score
   // the ranking against later — see store.js and eval.js.
@@ -80,3 +124,8 @@ export const config = {
 };
 
 export const credentialsMissing = !config.clientId || !config.clientSecret;
+
+// Chat-only detection is possible whenever there is somebody to listen to.
+// Without credentials AND without a watch list there is nothing to run at all.
+export const chatOnlyPossible = config.chatEnabled && config.watchChannels.length > 0;
+export const nothingToRun = credentialsMissing && !chatOnlyPossible;

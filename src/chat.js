@@ -60,6 +60,21 @@ const CALLOUT_MINIMUM = 2; // "clip that" said at least twice
 // not the streamer. High volume, near-zero uniqueness, flooded within minutes.
 const SHARED_CHANNELS = 3;
 
+/**
+ * The spike gates, published so a caller can report what it is measuring
+ * against instead of restating the numbers and drifting out of sync.
+ *
+ * The volume path ANDs three conditions, which means a run that finds nothing
+ * is ambiguous unless you can see which one held it back.
+ */
+export const THRESHOLDS = {
+  floorMessages: FLOOR_MESSAGES,
+  minRise: MIN_RISE,
+  spikeZ: SPIKE_Z,
+  calloutMinimum: CALLOUT_MINIMUM,
+  sharedChannels: SHARED_CHANNELS,
+};
+
 // A second spike this soon after the last one is the same moment still going.
 const CANDIDATE_GAP_MS = 40_000;
 const CANDIDATE_TTL_MS = 30 * 60_000;
@@ -187,6 +202,9 @@ class ChannelCounter {
       // Kept as the raw volume z-score under its original name, because that
       // is what it has always meant to callers.
       z: round(this.volume.z),
+      // The bucket's raw count. Exposed so the floor and the rise-over-median
+      // gates can be checked from outside rather than inferred from the rate.
+      messages: this.volume.value ?? 0,
       reaction: round(this.reaction),
       messagesPerSecond: round(this.volume.value / (BUCKET_MS / 1000), 1),
       baseline: Math.round(this.volume.baseline),

@@ -40,6 +40,50 @@ npm start
 
 and open <http://localhost:3000/?demo=1>.
 
+### Running without credentials
+
+Chat is anonymous and unmetered, so **moment detection needs no Twitch account
+at all**. It is also the only signal that can fire *before* anybody has
+clipped, which makes it the half worth having first.
+
+```bash
+npm start
+```
+
+With an empty `.env` this starts in **chat-only** mode: it joins the watch
+list's chat over anonymous IRC, scores every ten-second bucket against that
+channel's own rolling median, and puts a moment on the feed when chat reacts.
+Set `WATCH_CHANNELS=name,name` in `.env` to choose who it listens to, or leave
+it unset for a built-in starting list.
+
+What chat-only **cannot** do is measure saturation. Counting who already
+grabbed a moment means reading clips, and that needs the API. So in this mode
+the card says `NOT MEASURED` rather than `NOBODY YET`, there is no clip count,
+and the deep link is the live channel rather than a VOD timestamp. A zero you
+never measured is not a zero.
+
+To find spots without a browser open:
+
+```bash
+npm run check -- 300
+```
+
+That listens for five minutes and prints each moment as chat nominates it.
+Nothing scores for the first ~60s while the baseline settles. However the run
+ends, it reports how close each gate came to firing:
+
+```
+  the closest anything came, per gate:
+
+    volume z            lirik           11.5          needs 3
+    rise over median    lirik           5.09x         needs 1.5x
+    messages / bucket   sodapoppin      146           needs 8
+    clip calls          -               0 (z 0.0)     needs 2 and z 3
+```
+
+The volume path needs the first three at once, so a quiet run is only
+interpretable if you can see which one held it back.
+
 ### Credentials
 
 Twitch's public endpoints still need an app token.

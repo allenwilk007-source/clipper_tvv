@@ -10,11 +10,19 @@ const els = {
   sort: document.getElementById('sort'),
   vertical: document.getElementById('vertical'),
   template: document.getElementById('card-template'),
+  mode: document.getElementById('mode'),
 };
 
 let filter = 'all';
 let sort = 'opportunity';
 let latest = null;
+
+// Chat-only means there is no app token, so no clip was ever fetched. Every
+// moment then has saturation 0 — and that 0 means "not measured", not "nobody
+// has it". The difference matters enough to change the words on the card:
+// telling an operator a moment is unclaimed when we simply never looked is the
+// one lie this feed cannot afford.
+let chatOnly = false;
 
 // Cards are rebuilt from scratch on every feed poll, so clip state cannot live
 // in the DOM or it would vanish mid-download. Keyed by moment id; `cards`
@@ -56,14 +64,22 @@ function renderStats(meta, game) {
     ? `${meta.chat.connectedShards}/${meta.chat.shards} sockets · ${meta.chat.channels} ch`
     : 'off';
 
-  const cells = [
-    ['Early', meta.counts.early ?? 0],
-    ['Fresh', meta.counts.fresh],
-    ['Warm', meta.counts.warm],
-    ['Flooded', meta.counts.flooded],
-    ['Clips scanned', number(meta.clipsScanned)],
-    ['Live channels', number(meta.liveChannels)],
-  ];
+  // Without a token there are no clips to scan, and no way to know which of
+  // the watched channels is actually broadcasting. Reporting either as a zero
+  // would read as a measurement rather than an absence.
+  const cells = chatOnly
+    ? [
+        ['Early', meta.counts.early ?? 0],
+        ['Watched', number(meta.watchedChannels)],
+      ]
+    : [
+        ['Early', meta.counts.early ?? 0],
+        ['Fresh', meta.counts.fresh],
+        ['Warm', meta.counts.warm],
+        ['Flooded', meta.counts.flooded],
+        ['Clips scanned', number(meta.clipsScanned)],
+        ['Live channels', number(meta.liveChannels)],
+      ];
 
   els.stats.innerHTML = cells
     .map(([label, value]) => `<div><b>${value}</b>${label}</div>`)
@@ -84,7 +100,9 @@ function buildCard(moment) {
   node.querySelector('.sat-count').textContent = moment.saturation === 0 ? '—' : moment.saturation;
   node.querySelector('.sat-label').textContent =
     moment.saturation === 0
-      ? 'nobody yet'
+      ? chatOnly
+        ? 'not measured'
+        : 'nobody yet'
       : moment.uniqueClippers === moment.saturation
         ? 'clippers'
         : 'clips';
@@ -110,7 +128,8 @@ function buildCard(moment) {
   }
   if (moment.saturation > 0) bits.push(`${moment.clipsPerMinute}/min`);
   if (moment.viewers != null) bits.push(`${number(moment.viewers)} viewers`);
-  bits.push(`${number(moment.clipViews)} clip views`);
+  // Same lie as saturation: with no API this is an absence, not a zero.
+  if (!chatOnly) bits.push(`${number(moment.clipViews)} clip views`);
   bits.push(ago(moment.minutesSinceLastClip));
   if (moment.firstClipper) bits.push(`first: ${moment.firstClipper}`);
   if (moment.basis === 'created') bits.push('VOD position pending');
@@ -122,14 +141,22 @@ function buildCard(moment) {
 
   const open = node.querySelector('.open');
   open.href = moment.deepLink;
-  open.textContent = moment.vodId ? 'Open at moment' : 'Open clip';
+  // Chat-only has no VOD and no clip to point at, so the link is the live
+  // channel — and the button should say so rather than promise a clip.
+  open.textContent = moment.vodId
+    ? 'Open at moment'
+    : chatOnly
+      ? 'Watch live'
+      : 'Open clip';
 
   const clip = node.querySelector('.clip');
   if (!canClip(moment)) {
     // Without a VOD id and offset there is nothing to cut from: these are the
     // moments whose position Twitch has not published yet.
     clip.disabled = true;
-    clip.title = 'No VOD position yet — Twitch publishes it a minute or two late';
+    clip.title = chatOnly
+      ? 'Needs Twitch credentials to resolve the VOD — clip it on Twitch for now'
+      : 'No VOD position yet — Twitch publishes it a minute or two late';
   } else {
     clip.addEventListener('click', () => startClip(moment));
   }
@@ -176,7 +203,9 @@ function renderChatEvidence(box, moment) {
 
   if (moment.unconfirmed) {
     const warn = document.createElement('b');
-    warn.textContent = 'Unconfirmed — no clips yet. ';
+    warn.textContent = chatOnly
+      ? 'Chat only — clip count unavailable. '
+      : 'Unconfirmed — no clips yet. ';
     box.append(warn);
   }
 
@@ -252,7 +281,8 @@ async function startClip(moment) {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         vodId: moment.vodId,
-        offsetSeconds: moment.offsetSeconds,
+        // Cut around where people reacted, not where the first clip began.
+        offsetSeconds: moment.reactionOffsetSeconds ?? moment.offsetSeconds,
         broadcaster: moment.broadcaster,
         momentId: moment.id,
         vertical: els.vertical.checked,
@@ -298,6 +328,19 @@ function watchJobs() {
 function render() {
   if (!latest) return;
   const { moments, meta, game } = latest;
+
+  // Set before anything draws: the mode changes the wording on every card.
+  chatOnly = Boolean(meta.chatOnly);
+  els.mode.hidden = !chatOnly;
+  if (chatOnly) {
+    els.mode.innerHTML =
+      '<b>Chat-only.</b> No Twitch credentials, so moments come from chat alone — ' +
+      'found before anybody clips them, which is the point. What is missing is ' +
+      'saturation: with no API there is no way to count who already has a moment. ' +
+      'Add <code>TWITCH_CLIENT_ID</code> and <code>TWITCH_CLIENT_SECRET</code> to ' +
+      '<code>.env</code> and restart for the full feed.';
+  }
+
   renderStats(meta, game);
 
   if (meta.lastError) {
@@ -316,7 +359,9 @@ function render() {
   if (!shown.length) {
     const why = moments.length
       ? 'Nothing in this filter right now.'
-      : `No clips in the last ${meta.windowMinutes} minutes. Either the category is quiet, or the game has not launched yet.`;
+      : chatOnly
+        ? 'No chat spikes yet. The baseline is a rolling median and needs about a minute to settle; after that, moments appear as chat reacts. A quiet watch list stays empty, which is correct.'
+        : `No clips in the last ${meta.windowMinutes} minutes. Either the category is quiet, or the game has not launched yet.`;
     notice('Empty feed', `<p>${why}</p>`);
     return;
   }
@@ -336,9 +381,16 @@ async function poll() {
       const body = await res.json();
       els.game.textContent = 'not configured';
       els.stats.innerHTML = '';
+      els.mode.hidden = true;
+      // Two ways out of this state, and the cheap one needs no account at all.
       notice(
-        'Twitch credentials needed',
+        'Nothing to watch',
         `<p>${body.message}</p>
+         <p><b>Chat-only, no account needed:</b> put
+            <code>WATCH_CHANNELS=name,name</code> in <code>.env</code> and restart.
+            Moments come from chat, found before anybody clips them. Saturation
+            will be unavailable.</p>
+         <p><b>Full feed:</b></p>
          <ol>
            <li>Register an app at <code>dev.twitch.tv/console/apps</code></li>
            <li><code>cp .env.example .env</code></li>

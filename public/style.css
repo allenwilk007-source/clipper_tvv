@@ -160,6 +160,32 @@ select {
 
 /* ---------- feed ---------- */
 
+/* Says which half of the product is running. Blue to match the "early" state,
+   because chat-only produces nothing else. */
+.mode-banner {
+  margin: 0 20px 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--early);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.mode-banner b {
+  color: var(--text);
+}
+
+.mode-banner code {
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: #0a0c10;
+  color: var(--text);
+  font-size: 12px;
+}
+
 .feed {
   display: flex;
   flex-direction: column;
