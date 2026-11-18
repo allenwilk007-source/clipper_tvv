@@ -245,7 +245,7 @@ export function parseProgress(line) {
   return null;
 }
 
-function run(file, args, { cwd, onLine, label }) {
+export function run(file, args, { cwd, onLine, label }) {
   return new Promise((resolve, reject) => {
     const child = execFile(file, args, { cwd, maxBuffer: 1 << 24 }, (err, stdout, stderr) => {
       if (err) {

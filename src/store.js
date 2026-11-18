@@ -32,7 +32,7 @@ export const HORIZONS = [
 // fresh database free, but an existing one needs to know what it is already
 // holding — Phase 2 adds columns, and by then there will be launch-week data
 // in here that must not be thrown away to get them.
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 const SCHEMA = `
 create table if not exists moments (
@@ -80,6 +80,24 @@ create table if not exists outcomes (
   saturation  integer,
   primary key (moment_id, horizon)
 );
+
+-- v2: what autocollect has already cut. Without this a restart would re-cut
+-- every moment still inside the clip window. offset_seconds is kept so a
+-- moment that changes id (a chat spike later confirmed by clips) is still
+-- recognised as the same thing on the same VOD.
+create table if not exists autoclips (
+  moment_id      text primary key,
+  vod_id         text,
+  offset_seconds integer,
+  broadcaster    text,
+  caption        text,
+  status         text not null,
+  path           text,
+  error          text,
+  created_at     text not null,
+  finished_at    text
+);
+create index if not exists autoclips_by_created on autoclips(created_at);
 `;
 
 // node:sqlite refuses to bind `undefined`, and a single missing field would
@@ -140,12 +158,27 @@ export class Store {
         order by detected_at asc
         limit ?
       `),
+      insertAutoclip: this.db.prepare(`
+        insert into autoclips
+          (moment_id, vod_id, offset_seconds, broadcaster, caption, status, created_at)
+        values (?, ?, ?, ?, ?, 'queued', ?)
+        on conflict(moment_id) do nothing
+      `),
+      finishAutoclip: this.db.prepare(`
+        update autoclips set status = ?, path = ?, error = ?, finished_at = ? where moment_id = ?
+      `),
+      recentAutoclips: this.db.prepare(`
+        select moment_id as momentId, vod_id as vodId, offset_seconds as offsetSeconds,
+               broadcaster, status, created_at as createdAt
+          from autoclips where created_at >= ? order by created_at asc
+      `),
       counts: this.db.prepare(`
         select
           (select count(*) from moments) as moments,
           (select count(*) from clips) as clips,
           (select count(*) from observations) as observations,
-          (select count(*) from outcomes) as outcomes
+          (select count(*) from outcomes) as outcomes,
+          (select count(*) from autoclips) as autoclips
       `),
     };
   }
@@ -162,7 +195,9 @@ export class Store {
     const current = this.db.prepare('pragma user_version').get().user_version ?? 0;
     this.db.exec(SCHEMA);
 
-    // if (current < 2) this.db.exec('alter table moments add column ...');
+    // v2 only added a table, which `create table if not exists` above already
+    // handles for old and new databases alike. Column changes go here:
+    // if (current < 3) this.db.exec('alter table moments add column ...');
 
     if (current !== SCHEMA_VERSION) this.db.exec(`pragma user_version = ${SCHEMA_VERSION}`);
     return SCHEMA_VERSION;
@@ -285,6 +320,39 @@ export class Store {
 
   counts() {
     return this.q.counts.get();
+  }
+
+  /** Claim a moment for autocollect. Returns false if it was already claimed. */
+  recordAutoclip({ momentId, vodId, offsetSeconds, broadcaster, caption, at = new Date() }) {
+    const result = this.q.insertAutoclip.run(
+      momentId,
+      nul(vodId),
+      int(offsetSeconds),
+      nul(broadcaster),
+      nul(caption),
+      at.toISOString(),
+    );
+    return (result.changes ?? 0) > 0;
+  }
+
+  finishAutoclip(momentId, { status, path = null, error = null, at = new Date() }) {
+    this.q.finishAutoclip.run(status, nul(path), nul(error), at.toISOString(), momentId);
+  }
+
+  recentAutoclips({ since }) {
+    return this.q.recentAutoclips.all(new Date(since).toISOString());
+  }
+
+  /**
+   * Anything still 'queued' at startup was running when the process died. It
+   * is marked rather than retried: the moment has gone stale by now, and
+   * keeping the row means it still counts against re-cutting the same thing.
+   */
+  markInterruptedAutoclips({ at = new Date() } = {}) {
+    const result = this.db
+      .prepare(`update autoclips set status = 'interrupted', finished_at = ? where status = 'queued'`)
+      .run(at.toISOString());
+    return result.changes ?? 0;
   }
 
   all(sql, ...params) {

@@ -141,6 +141,14 @@ its start, and a window centred on it would capture the crowd reacting while
 cutting off whatever they were reacting to. The pre-roll is where the clip
 actually is.
 
+For a moment found through clips, the reaction point is the **end** of the
+earliest clip, not its `vod_offset`: Twitch's `vod_offset` is where a clip
+*starts*, and the clipper pressed the button at its end. The feed carries this
+as `reactionOffsetSeconds` (the earliest clip end, or for a chat moment the
+peak), and both **Clip it** and autocollect cut around it. Before that existed,
+**Clip it** cut around the clip's start, which is twenty-five seconds of
+lead-up and only the first five of what the clipper actually captured.
+
 The cut uses `--download-sections` with `--force-keyframes-at-cuts`, so only
 the relevant segments are fetched and the boundaries land on the second asked
 for rather than the nearest keyframe (on Twitch, up to two seconds away). The
@@ -174,6 +182,92 @@ on slower. They are lost on restart; the mp4 is the artefact worth keeping.
 Note that in `?demo=1` the VOD ids are synthetic, so **Clip it** there will
 fail with "Video 21 does not exist". That is the fixture being honest, not a
 bug — the button needs a real moment.
+
+## Autocollect: shorts with no clicks
+
+```bash
+npm run auto
+```
+
+Runs the feed headless and, as moments are detected, cuts each one, burns a
+caption in, renders a 9:16 short and drops it in `clips/ready/` as an `.mp4`
+with a `.txt` of post copy beside it. Nobody has to click anything.
+
+**It stops at the file.** Nothing here uploads or posts. What you post, you
+post yourself.
+
+What lands in `clips/ready/`, measured on real runs against a live GTA stream:
+
+| | |
+| --- | --- |
+| video | 1080x1920 H.264, 30.0s: 25s before the reaction, 5s after |
+| audio | AAC 48 kHz, normalised toward -14 LUFS. Measured -14.6 and -15.3: single-pass loudnorm lands a little under on a 30s clip, and both platforms re-normalise anyway |
+| caption | top band, centred, wrapped to three lines of 16 characters so it clears the column of buttons down the right |
+| credit | `@streamer on Twitch` under the picture, above the description overlay |
+| post copy | caption, credit, a link to the exact second in the full stream, hashtags |
+| time | about 30s from detection to finished file |
+
+### It works without Twitch credentials
+
+With an empty `.env` the feed watches chat on the channels in
+`WATCH_CHANNELS`, and autocollect places each chat spike on that channel's
+recording itself. yt-dlp finds the newest archive, which is trusted only if it
+is **still recording** (`is_live`): a streamer with archiving switched off has
+an old VOD at the top of the list, and cutting at today's offset into
+yesterday's broadcast would be a random clip. Measured on a live channel: the
+lookup takes about 5s and happens once per broadcast; the recording's start
+matched the stream's to 5s, and its duration matched wall-clock time to 3s.
+
+Credentials add clip-confirmed moments and the outcome data `npm run eval`
+needs. They are not needed to start producing shorts.
+
+### What gets cut
+
+Every poll, moments go through these rules, best-ranked first, so when a cap
+bites it is the weaker moments that miss out:
+
+| rule | default | why |
+| --- | --- | --- |
+| has a VOD and a position | | otherwise there is nothing to cut |
+| state | `early,fresh` | a flooded moment is already on everyone's feed |
+| settled | 30s after the window ends | measured: a live recording held full, moving footage 15s behind the live edge |
+| not stale | 20 min | by then someone else has had time to post it |
+| not already cut | 45s apart on one VOD | by position as well as id, because a chat spike later confirmed by clips comes back under a new id |
+| per poll / hour / channel | 2 / 6 / 2 | every cut is a re-encode, and a folder of one streamer is not a feed |
+| minimum score | 0 | deliberately off: nothing has calibrated the opportunity scale yet, and `npm run eval` should set this, not a guess |
+
+What has been cut is kept in the store, so a restart does not cut the same
+moments again. A render stopped halfway is marked `interrupted` rather than
+retried. The short is written next to its source and moved into
+`clips/ready/` only when complete, so a stopped process cannot leave a broken
+file in the folder you post from.
+
+Run it **instead of** `npm start`, not beside it: each starts its own feed,
+and two feeds spend the Twitch rate limit twice. Autocollected shorts do not
+appear in the web page yet.
+
+### The caption
+
+A clip title is a person describing that exact moment, so it wins when there
+is one. A chat-only moment has only the stream title, which describes the
+whole broadcast, so there the caption says what chat was doing, and only when
+that class actually spiked: `CHAT SAID CLIP IT`, `CHAT LOST IT`, `WAIT WHAT`,
+`LET'S GO`, `OH NO`. Stream-title furniture (`| !merch [DROPS ON]`) is
+stripped.
+
+Three traps in burning text into video, each hit for real while building this
+and each pinned by a test in `src/shortform.test.js`:
+
+- **A `%` kills the render.** drawtext expands `%{...}`, and with expansion on,
+  a plain `100%` in a title fails the whole encode. Captions go in through a
+  file, with `expansion=none`.
+- **The drive letter splits the font path.** The `:` in `C:/Windows/...` is the
+  option separator in a filtergraph, so the path needs escaping at two levels.
+- **Emoji and non-Latin text print as boxes.** Captions are limited to what the
+  font can draw; a title with nothing drawable left falls back to the chat hook
+  or the streamer's name.
+
+`SHORTS_FONT` takes any `.ttf`; the default is Segoe UI Black on Windows.
 
 ## Detection: being first, and proving it
 
@@ -398,6 +492,9 @@ src/eval.js     the scoreboard: does the ranking beat chance?
 src/feed.js     polling loops and current state
 src/clip.js     VOD section download + 9:16 render (yt-dlp/ffmpeg)
 src/clipjobs.js in-memory clip queue, two at a time
+src/shortform.js caption, 9:16 render with text, post copy
+src/autoclip.js which moments to cut, and cutting them
+src/auto.js     npm run auto: feed + autocollect, headless
 src/server.js   HTTP + static
 src/demo.js     fixture, pushed through the real pipeline
 src/check.js    one-shot smoke test

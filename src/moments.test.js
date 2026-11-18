@@ -322,3 +322,40 @@ test('a spike keeps one id as its peak moves', () => {
   // The offset still tracks the peak, which is where the moment actually is.
   assert.ok(later.offsetSeconds > early.offsetSeconds);
 });
+
+test('a clip moment is cut around where the clipper reacted, not where the clip starts', () => {
+  // vod_offset is where a Twitch clip STARTS. The clipper pressed the button
+  // at its END, after the thing happened, so cutting around the start lands in
+  // the lead-up. Every "Clip it" on a clip-sourced moment used to do exactly
+  // that. The earliest end is the earliest reaction.
+  const [moment] = clusterClips(
+    [
+      { ...clip({ offset: 1000, creator: 'alice' }), duration: 30 },
+      { ...clip({ offset: 1010, creator: 'bob' }), duration: 26 },
+    ],
+    { gapSeconds: 30 },
+  );
+  // Left alone: clustering, merging and the store all mean the start.
+  assert.equal(moment.offsetSeconds, 1000);
+  assert.equal(moment.reactionOffsetSeconds, 1030);
+});
+
+test("a clip without a duration assumes Twitch's default length", () => {
+  const [moment] = clusterClips([clip({ offset: 500 })]);
+  assert.equal(moment.reactionOffsetSeconds, 530);
+});
+
+test('scoring carries the reaction offset through to the feed', () => {
+  const [moment] = scoreMoments(clusterClips([{ ...clip({ offset: 700 }), duration: 20 }]), {
+    now: BASE + 60_000,
+  });
+  assert.equal(moment.reactionOffsetSeconds, 720);
+});
+
+test('a chat moment needs no correction: its peak already is the reaction', () => {
+  const [moment] = chatCandidateMoments(
+    [{ login: 'x', startedAt: BASE, peakAt: BASE + 30_000, lastAt: BASE + 40_000, chat: {} }],
+    { channels: new Map([['x', { startedAt: new Date(BASE - 1000_000).toISOString() }]]) },
+  );
+  assert.equal(moment.reactionOffsetSeconds, moment.offsetSeconds);
+});

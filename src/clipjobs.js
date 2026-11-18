@@ -14,10 +14,12 @@
 // clip slower while someone is waiting on the first one.
 
 import { randomUUID } from 'node:crypto';
-import { relative } from 'node:path';
+import { rm } from 'node:fs/promises';
+import { basename, extname, join, relative } from 'node:path';
 
 import { config, root } from './config.js';
 import { extractClip } from './clip.js';
+import { renderShort } from './shortform.js';
 
 const jobs = new Map();
 const waiting = [];
@@ -51,6 +53,10 @@ export function publicJob(job) {
     message: job.message,
     path: show(job.path),
     verticalPath: show(job.verticalPath),
+    shortPath: show(job.shortPath),
+    textPath: show(job.textPath),
+    caption: job.caption,
+    auto: Boolean(job.short?.auto),
     durationSeconds: job.durationSeconds,
     queuedAt: job.queuedAt,
     startedAt: job.startedAt,
@@ -72,6 +78,7 @@ function pump() {
       post: job.post,
       vertical: job.vertical,
       broadcaster: job.broadcaster,
+      dir: job.dir,
       onProgress: ({ stage, percent, seconds, message }) => {
         job.stage = stage;
         if (Number.isFinite(percent) && percent > 0) job.progress = Math.round(percent);
@@ -87,13 +94,43 @@ function pump() {
         else if (Number.isFinite(seconds)) job.message = `cutting ${Math.round(seconds)}s`;
       },
     })
-      .then((result) => {
-        job.state = 'done';
-        job.progress = 100;
+      .then(async (result) => {
         job.path = result.path;
         job.verticalPath = result.verticalPath;
         job.durationSeconds = result.durationSeconds;
-        job.message = `${result.durationSeconds}s saved`;
+
+        // A third stage, run inside the same job so it shares the same
+        // concurrency budget: the captioned 9:16 short, plus its post copy.
+        if (job.short) {
+          job.stage = 'short';
+          job.progress = 0;
+          const made = await renderShort({
+            input: result.path,
+            output: join(job.short.dir, `${basename(result.path, extname(result.path))}.mp4`),
+            moment: job.short.moment,
+            start: result.start,
+            onProgress: ({ seconds, message }) => {
+              if (Number.isFinite(seconds) && job.expectedSeconds > 0) {
+                job.progress = Math.min(99, Math.round((seconds / job.expectedSeconds) * 100));
+              }
+              if (message) job.message = message;
+            },
+          });
+          job.shortPath = made.path;
+          job.textPath = made.textPath;
+          job.caption = made.caption;
+          // The landscape cut was only ever an intermediate for this job.
+          if (!job.short.keepSource) {
+            await rm(result.path, { force: true });
+            job.path = null;
+          }
+        }
+
+        job.state = 'done';
+        job.progress = 100;
+        job.message = job.shortPath
+          ? `short ready (${result.durationSeconds}s)`
+          : `${result.durationSeconds}s saved`;
       })
       .catch((err) => {
         job.state = 'failed';
@@ -104,6 +141,13 @@ function pump() {
         running -= 1;
         trim();
         pump();
+        if (job.onSettled) {
+          try {
+            job.onSettled(job);
+          } catch {
+            /* a broken listener must not jam the queue */
+          }
+        }
       });
   }
 }
@@ -117,6 +161,9 @@ export function enqueueClip({
   vertical = false,
   broadcaster = '',
   momentId = null,
+  dir = undefined,
+  short = null,
+  onSettled = null,
 }) {
   const job = {
     id: randomUUID(),
@@ -128,6 +175,12 @@ export function enqueueClip({
     vertical: Boolean(vertical),
     broadcaster,
     momentId,
+    dir,
+    short,
+    onSettled,
+    shortPath: null,
+    textPath: null,
+    caption: null,
     // What the clip should come out as, used to turn ffmpeg's position into a
     // percentage. The pre-roll is clamped by the start of the VOD.
     expectedSeconds: Math.min(Number(pre) || 0, Number(offsetSeconds) || 0) + (Number(post) || 0),

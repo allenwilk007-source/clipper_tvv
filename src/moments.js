@@ -38,6 +38,9 @@ function formatTimestamp(totalSeconds) {
   return `${hours}h${String(minutes).padStart(2, '0')}m${String(seconds).padStart(2, '0')}s`;
 }
 
+// Twitch's default clip length, used when a clip arrives without its duration.
+const DEFAULT_CLIP_SECONDS = 30;
+
 function buildMoment(clips, basis) {
   const byTime = [...clips].sort(
     (a, b) => Date.parse(a.created_at) - Date.parse(b.created_at),
@@ -49,6 +52,16 @@ function buildMoment(clips, basis) {
 
   const offsets = clips.map((c) => c.vod_offset).filter((v) => Number.isFinite(v));
   const offsetSeconds = offsets.length ? Math.min(...offsets) : null;
+
+  // Where people REACTED, which is what a cut has to be built around. Twitch's
+  // vod_offset is where a clip STARTS; the clipper pressed the button at its
+  // END, after the thing happened. Cutting around the start lands in the
+  // lead-up and can miss the moment entirely. The earliest end is the
+  // earliest reaction, so it is the one closest to the moment itself.
+  const ends = clips
+    .filter((c) => Number.isFinite(c.vod_offset))
+    .map((c) => c.vod_offset + (Number(c.duration) > 0 ? Number(c.duration) : DEFAULT_CLIP_SECONDS));
+  const reactionOffsetSeconds = ends.length ? Math.round(Math.min(...ends)) : null;
 
   return {
     id: `${first.broadcaster_id}:${basis}:${offsetSeconds ?? first.created_at}`,
@@ -62,6 +75,7 @@ function buildMoment(clips, basis) {
     clipIds: clips.map((c) => c.id).filter(Boolean),
     vodId: first.video_id || null,
     offsetSeconds,
+    reactionOffsetSeconds,
     saturation: clips.length,
     uniqueClippers: new Set(clips.map((c) => c.creator_name).filter(Boolean)).size,
     firstClipper: first.creator_name || null,
@@ -179,6 +193,8 @@ export function chatCandidateMoments(candidates, { channels = new Map() } = {}) 
       clipIds: [],
       vodId: channel?.vodId || null,
       offsetSeconds,
+      // The chat peak already is the reaction, so no correction applies.
+      reactionOffsetSeconds: offsetSeconds,
       offsetEstimated: true,
       saturation: 0,
       uniqueClippers: 0,
