@@ -268,7 +268,7 @@ test('a moment whose game cannot be told is skipped, not guessed', () => {
 
 test('the defaults now allow far more shorts an hour', () => {
   const defaults = autoclipConfig({});
-  assert.equal(defaults.perHour, 30);
+  assert.equal(defaults.perHour, 60);
   assert.equal(defaults.perChannelPerHour, 6);
   assert.equal(defaults.maxPerPoll, 4);
   assert.deepEqual(defaults.games, ['Grand Theft Auto VI', 'Fortnite']);

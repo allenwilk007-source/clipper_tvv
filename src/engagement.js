@@ -85,13 +85,16 @@ export async function measureCut(path) {
       return []; // no audio stream, say: that signal is simply absent
     }
   };
-  const [loudness, motion] = await Promise.all([
-    measure(['-vn', '-af', 'ebur128=metadata=1,ametadata=mode=print:key=lavfi.r128.M:file=-'], 'lavfi.r128.M'),
-    measure(
-      ['-an', '-vf', "fps=5,scale=320:-2,select='gte(scene,0)',metadata=mode=print:key=lavfi.scene_score:file=-"],
-      'lavfi.scene_score',
-    ),
-  ]);
+  // One pass after the other: see analyse() in clipjobs.js for why bursts of
+  // processes are avoided.
+  const loudness = await measure(
+    ['-vn', '-af', 'ebur128=metadata=1,ametadata=mode=print:key=lavfi.r128.M:file=-'],
+    'lavfi.r128.M',
+  );
+  const motion = await measure(
+    ['-an', '-vf', "fps=5,scale=320:-2,select='gte(scene,0)',metadata=mode=print:key=lavfi.scene_score:file=-"],
+    'lavfi.scene_score',
+  );
   // The loudness meter reads -120 until its 400ms window has filled.
   return { loudness: loudness.filter((p) => p.v > -70), motion };
 }

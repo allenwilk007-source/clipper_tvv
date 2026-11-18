@@ -55,10 +55,12 @@ export function autoclipConfig(source = process.env) {
       .split(',')
       .map((state) => state.trim())
       .filter(Boolean),
-    // Volume. Two renders run at once at about 30s each, so 30 an hour leaves
-    // the queue mostly idle; the per-channel cap keeps one hot streamer from
-    // being the whole folder.
-    perHour: num(source.AUTOCLIP_PER_HOUR, 30),
+    // Volume. This caps how many, not how hard the machine works: that is the
+    // two-renders-at-once limit. Two jobs at 40-90s each (cut, review,
+    // render, checks) leave room for 60 an hour. Raised from 30 after live
+    // runs hit 30 inside the hour. The per-channel cap keeps one hot streamer
+    // from being the whole folder.
+    perHour: num(source.AUTOCLIP_PER_HOUR, 60),
     perChannelPerHour: num(source.AUTOCLIP_PER_CHANNEL_PER_HOUR, 6),
     maxPerPoll: num(source.AUTOCLIP_MAX_PER_POLL, 4),
     settleSeconds: num(source.AUTOCLIP_SETTLE_SECONDS, 30),

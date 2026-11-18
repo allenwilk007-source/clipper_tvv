@@ -251,7 +251,7 @@ bites it is the weaker moments that miss out:
 | settled | 30s after the window ends | measured: a live recording held full, moving footage 15s behind the live edge |
 | not stale | 20 min | by then someone else has had time to post it |
 | not already cut | 45s apart on one VOD | by position as well as id, because a chat spike later confirmed by clips comes back under a new id |
-| per poll / hour / channel | 4 / 30 / 6 | two renders run at once at about 30s each, so 30 an hour leaves room; the per-channel cap keeps one hot streamer from being the whole folder |
+| per poll / hour / channel | 4 / 60 / 6 | the cap limits volume, not load (two renders at once does that); raised from 30 after live runs hit it inside the hour. The hour counts every copy's cuts, through the store |
 | minimum score | 0 | deliberately off: nothing has calibrated the opportunity scale yet, and `npm run eval` should set this, not a guess |
 
 What has been cut is kept in the store, so a restart does not cut the same

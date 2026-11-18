@@ -660,7 +660,9 @@ function buildShort(item) {
           ? `Failed: ${item.error || 'unknown error'}`
           : item.status === 'interrupted'
             ? 'Interrupted by a restart'
-            : 'File moved or deleted';
+            : item.status === 'rejected'
+              ? `Rejected, moved to clips/rejected/: ${item.error || 'failed its checks'}`
+              : 'File moved or deleted';
     frame.append(placeholder);
     node.classList.add(`is-${item.status}`);
     download.remove();

@@ -689,7 +689,8 @@ select {
   text-align: center;
 }
 
-.short.is-failed .short-placeholder {
+.short.is-failed .short-placeholder,
+.short.is-rejected .short-placeholder {
   color: var(--danger);
 }
 
@@ -835,6 +836,12 @@ select {
 }
 
 /* ---------- engagement meter ---------- */
+
+/* `display: flex` would otherwise override [hidden], and an unscored short
+   would show an empty meter at 100% - which reads as a perfect score. */
+.short-meter[hidden] {
+  display: none;
+}
 
 .short-meter {
   display: flex;

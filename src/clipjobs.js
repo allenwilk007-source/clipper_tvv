@@ -100,9 +100,16 @@ async function cutChecked(options) {
   return { ...result, measured: actual };
 }
 
-/** Speech and signals for one cut, for the meter. */
+/**
+ * Speech and signals for one cut, for the meter. One after the other, not at
+ * once: in parallel this started transcription (python and ffmpeg) and two
+ * more ffmpeg passes together, and with two jobs running that burst of eight
+ * or more processes is what made Windows refuse to start any (3221225794)
+ * under sustained load. Sequential costs about a second a short.
+ */
 async function analyse(path, settings) {
-  const [speech, measured] = await Promise.all([speechIn(path, settings), measureCut(path)]);
+  const speech = await speechIn(path, settings);
+  const measured = await measureCut(path);
   return { ...speech, measured };
 }
 
