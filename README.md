@@ -131,6 +131,80 @@ Note that in `?demo=1` the VOD ids are synthetic, so **Clip it** there will
 fail with "Video 21 does not exist". That is the fixture being honest, not a
 bug — the button needs a real moment.
 
+## Detection: being first, and proving it
+
+Two problems shaped everything in `src/chat.js`, `src/store.js` and
+`src/eval.js`, and they are worth stating plainly because they are easy to miss.
+
+**The clip feed structurally cannot be first.** Clips are its only input, so a
+moment cannot exist until somebody has already clipped it. `saturation = 1`
+means one person beat you. Chat is the only signal available that fires at
+saturation ZERO.
+
+**"Best" was unfalsifiable.** The ranking formula had never been checked
+against whether the moments it liked went on to do anything, so there was no
+way to tell a signal that works from one that merely sounds right.
+
+### Chat-sourced moments
+
+A chat spike with no clips attached now becomes a moment of its own, marked
+**chat only** and drawn with a dashed border. Two things about it are honest
+compromises, and the card says so rather than hiding them:
+
+- **nobody has clipped it.** It might be nothing. That is the price of being
+  first, and it is the right price — a confirmed moment is one you are late to.
+- **the VOD offset is estimated** from stream uptime, so it is a good place to
+  start looking, not a frame-accurate timestamp.
+
+When clips do show up on the same channel at the same time, the two rows are
+merged into one marked `both` — something happened *and* almost nobody has it.
+
+### What chat is reacting with
+
+Message rate alone treats `KEKW`, `CLIP THAT` and `monkaS` as the same event.
+They are not. `src/reactions.js` scores each class separately, against its own
+baseline:
+
+| class | why it matters |
+|---|---|
+| `clipit` | chat literally asking for a clip — the highest-precision signal there is, and it gets its own path to nominating a moment even when message rate barely moves |
+| `funny` | travels furthest off Twitch, because it needs no context |
+| `hype` | high ceiling, short shelf life |
+| `tension` | needs setup, which a 15-second vertical cut cannot carry |
+| `shock` | strong but often ambiguous |
+
+Plus two structural signals: **unique chatters** (the whole room reacting is a
+different event from four people spamming) and **copypasta ratio** (a meme
+forming is the best predictor that a moment will leave the platform).
+
+If three or more watched channels spike within the same ten seconds, the moment
+is marked **shared** and discounted by half: that is the game doing something,
+not the streamer, and every clipper in the category will have it within minutes.
+
+### The scoreboard
+
+```bash
+npm run eval
+```
+
+Every moment, clip and poll is written to `data/feed.db` (`node:sqlite`, which
+is in the Node standard library — the zero-dependency rule still holds). The
+clips of moments already seen are re-polled at 15m, 1h, 6h and 24h, which gives
+two labels worth having:
+
+- **views at 24h** — did the clip perform?
+- **lead time** — seconds between the first clip and the first clip by a
+  *different* creator. One person making four clips of their own moment is one
+  person, not competition, and counting it otherwise would flatter every number.
+
+`npm run eval` prints precision@20 against the top decile by views, next to
+what chance alone would have given you. **Lift above 1.0 means the ranking is
+doing something.** Nothing that claims to improve detection ships without
+moving that number — including the reaction weights in `src/reactions.js`,
+which are a starting position rather than a result.
+
+With no history it says so, rather than printing a confident zero.
+
 ## How a moment gets ranked
 
 ```
@@ -222,7 +296,10 @@ product.
 ```
 src/twitch.js   Helix client — app token, rate limits, pagination
 src/moments.js  clustering + the ranking formula (the product)
-src/chat.js     pooled anonymous IRC, median/MAD spike scoring
+src/chat.js     pooled anonymous IRC, per-class median/MAD spike scoring
+src/reactions.js what chat is reacting WITH — the class table
+src/store.js    node:sqlite persistence + outcome recording
+src/eval.js     the scoreboard: does the ranking beat chance?
 src/feed.js     polling loops and current state
 src/clip.js     VOD section download + 9:16 render (yt-dlp/ffmpeg)
 src/clipjobs.js in-memory clip queue, two at a time

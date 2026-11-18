@@ -5,7 +5,13 @@
 // is pushed through the real clusterClips/scoreMoments path rather than being
 // hand-written output, so it exercises the actual pipeline.
 
-import { clusterClips, scoreMoments } from './moments.js';
+import {
+  chatCandidateMoments,
+  clusterClips,
+  mergeChatCandidates,
+  publicMoments,
+  scoreMoments,
+} from './moments.js';
 
 const STREAMERS = [
   ['xqc', '1', 184_000],
@@ -78,7 +84,65 @@ export function demoSnapshot(now = Date.now()) {
     ['jynxzi', { z: 4.8, messagesPerSecond: 33.5, baseline: 12, spiking: true }],
   ]);
 
-  const moments = scoreMoments(clusterClips(clips, { gapSeconds: 30 }), {
+  // Chat spikes nobody has clipped yet. Without these the demo cannot show the
+  // one row type that exists to beat the crowd rather than keep up with it.
+  const channels = new Map(
+    STREAMERS.map(([login, id, viewers]) => [
+      login,
+      {
+        broadcasterId: id,
+        displayName: login,
+        startedAt: new Date(now - 2 * 3600_000).toISOString(),
+        vodId: `v${id}demo`,
+        title: 'GTA VI',
+        viewers,
+      },
+    ]),
+  );
+
+  const candidate = (login, minutesAgo, reaction, classes, shared = false) => {
+    const peakAt = now - minutesAgo * 60_000;
+    return {
+      login,
+      startedAt: peakAt - 10_000,
+      peakAt,
+      lastAt: peakAt,
+      buckets: 2,
+      reaction,
+      shared,
+      chat: {
+        z: 4.2,
+        reaction,
+        shared,
+        messagesPerSecond: 58.1,
+        baseline: 19,
+        chatters: 240,
+        chattersZ: 3.8,
+        copypasta: 0.44,
+        spiking: true,
+        classes: Object.fromEntries(
+          ['clipit', 'funny', 'hype', 'tension', 'shock'].map((name) => [
+            name,
+            { count: classes[name] || 0, z: classes[name] ? 4 : 0 },
+          ]),
+        ),
+      },
+    };
+  };
+
+  const candidates = [
+    candidate('caseoh_', 0.5, 11.4, { clipit: 9, funny: 31 }),
+    candidate('shroud', 2, 7.2, { hype: 26, shock: 11 }),
+    // Everyone at once: a game event, not a streamer moment.
+    candidate('summit1g', 4, 9.1, { hype: 40 }, true),
+  ];
+
+  const withChat = mergeChatCandidates(
+    clusterClips(clips, { gapSeconds: 30 }),
+    chatCandidateMoments(candidates, { channels }),
+  );
+
+  const moments = scoreMoments(withChat, {
     now,
     chatSpikes,
     streams,
@@ -86,7 +150,7 @@ export function demoSnapshot(now = Date.now()) {
     leadInSeconds: 20,
   });
 
-  const counts = { fresh: 0, warm: 0, flooded: 0 };
+  const counts = { early: 0, fresh: 0, warm: 0, flooded: 0 };
   for (const moment of moments) counts[moment.state] += 1;
 
   // Growth since the last poll isn't meaningful in a one-shot fixture, so give
@@ -97,7 +161,7 @@ export function demoSnapshot(now = Date.now()) {
 
   return {
     game: { id: '0', name: 'Grand Theft Auto VI (demo data)' },
-    moments,
+    moments: publicMoments(moments),
     meta: {
       counts,
       totalMoments: moments.length,

@@ -57,6 +57,7 @@ function renderStats(meta, game) {
     : 'off';
 
   const cells = [
+    ['Early', meta.counts.early ?? 0],
     ['Fresh', meta.counts.fresh],
     ['Warm', meta.counts.warm],
     ['Flooded', meta.counts.flooded],
@@ -78,11 +79,18 @@ function buildCard(moment) {
   const node = els.template.content.firstElementChild.cloneNode(true);
   node.classList.add(`is-${moment.state}`);
 
-  node.querySelector('.sat-count').textContent = moment.saturation;
+  // Zero is the whole pitch for a chat-sourced moment, so say it as a word
+  // rather than showing a "0" that reads like missing data.
+  node.querySelector('.sat-count').textContent = moment.saturation === 0 ? '—' : moment.saturation;
   node.querySelector('.sat-label').textContent =
-    moment.uniqueClippers === moment.saturation ? 'clippers' : 'clips';
+    moment.saturation === 0
+      ? 'nobody yet'
+      : moment.uniqueClippers === moment.saturation
+        ? 'clippers'
+        : 'clips';
 
-  node.querySelector('.state').textContent = moment.state;
+  node.querySelector('.state').textContent =
+    moment.state === 'early' ? 'chat only' : moment.state;
 
   const name = node.querySelector('.broadcaster');
   name.textContent = moment.broadcaster;
@@ -100,13 +108,17 @@ function buildCard(moment) {
   } else if (moment.chatZ > 0) {
     bits.push(`chat ${moment.chatZ.toFixed(1)}σ`);
   }
-  bits.push(`${moment.clipsPerMinute}/min`);
+  if (moment.saturation > 0) bits.push(`${moment.clipsPerMinute}/min`);
   if (moment.viewers != null) bits.push(`${number(moment.viewers)} viewers`);
   bits.push(`${number(moment.clipViews)} clip views`);
   bits.push(ago(moment.minutesSinceLastClip));
   if (moment.firstClipper) bits.push(`first: ${moment.firstClipper}`);
   if (moment.basis === 'created') bits.push('VOD position pending');
+  if (moment.offsetEstimated) bits.push('offset estimated');
+  if (moment.shared) bits.push('<span class="shared">whole category spiked</span>');
   node.querySelector('.meta').innerHTML = bits.join('<span>·</span>');
+
+  renderChatEvidence(node.querySelector('.chat-evidence'), moment);
 
   const open = node.querySelector('.open');
   open.href = moment.deepLink;
@@ -129,6 +141,59 @@ function buildCard(moment) {
 }
 
 const canClip = (moment) => Boolean(moment.vodId) && Number.isFinite(moment.offsetSeconds);
+
+const CLASS_LABELS = {
+  clipit: 'chat asked for a clip',
+  funny: 'laughing',
+  hype: 'hype',
+  tension: 'tension',
+  shock: 'shock',
+};
+
+/**
+ * What chat actually did, under the card.
+ *
+ * An unconfirmed moment has to show its working: nobody has clipped it, the
+ * offset is a guess, and the only reason it is on screen at all is this. The
+ * operator deserves to see the evidence rather than a number asking to be
+ * trusted.
+ */
+function renderChatEvidence(box, moment) {
+  const chat = moment.chat;
+  const classes = chat?.classes || {};
+  const fired = Object.entries(classes)
+    .filter(([, value]) => value.count > 0 && value.z > 1)
+    .sort((a, b) => b[1].z - a[1].z)
+    .slice(0, 3);
+
+  if (!fired.length && !moment.unconfirmed) {
+    box.hidden = true;
+    return;
+  }
+
+  box.hidden = false;
+  box.textContent = '';
+
+  if (moment.unconfirmed) {
+    const warn = document.createElement('b');
+    warn.textContent = 'Unconfirmed — no clips yet. ';
+    box.append(warn);
+  }
+
+  if (!fired.length) {
+    box.append(document.createTextNode('Chat spiked.'));
+    return;
+  }
+
+  box.append(
+    document.createTextNode(
+      fired.map(([name, value]) => `${CLASS_LABELS[name] || name} ×${value.count}`).join(', '),
+    ),
+  );
+  if (chat?.copypasta > 0.3) {
+    box.append(document.createTextNode(` · ${Math.round(chat.copypasta * 100)}% copypasta`));
+  }
+}
 
 function paintClip(momentId) {
   const node = cards.get(momentId);

@@ -5,6 +5,7 @@
   --line: #262d3a;
   --text: #e7ebf3;
   --muted: #8b95a8;
+  --early: #4db8ff;
   --fresh: #35d07f;
   --warm: #e9b23c;
   --flooded: #6a7488;
@@ -185,6 +186,38 @@ select {
 
 .card.is-warm {
   border-left-color: var(--warm);
+}
+
+/* Dashed, because this one is a claim rather than a fact: chat spiked, but
+   nobody has clipped it and the VOD offset is an estimate. */
+.card.is-early {
+  border-left-color: var(--early);
+  border-left-style: dashed;
+  background: linear-gradient(90deg, rgba(77, 184, 255, 0.08), var(--panel) 220px);
+}
+
+.is-early .state {
+  background: rgba(77, 184, 255, 0.16);
+  color: var(--early);
+}
+
+.is-early .sat-count {
+  color: var(--early);
+}
+
+.chat-evidence {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.chat-evidence b {
+  color: var(--early);
+  font-weight: 600;
+}
+
+.meta .shared {
+  color: var(--flooded);
 }
 
 .sat {

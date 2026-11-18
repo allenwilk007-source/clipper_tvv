@@ -51,6 +51,19 @@ export const config = {
   leadInSeconds: num(process.env.LEAD_IN_SECONDS, 20),
   chatChannels: num(process.env.CHAT_CHANNELS, 80),
   chatEnabled: process.env.CHAT_ENABLED !== 'false',
+  // Spike thresholds. See the comment on FLOOR_MESSAGES in chat.js for why the
+  // floor is low: a high one can only ever admit channels whose moments are
+  // already flooded.
+  chatFloorMessages: num(process.env.CHAT_FLOOR_MESSAGES, 8),
+  chatMinRise: num(process.env.CHAT_MIN_RISE, 1.5),
+  chatSpikeZ: num(process.env.CHAT_SPIKE_Z, 3),
+
+  // Persistence. The point is not durability, it's having a label to score
+  // the ranking against later — see store.js and eval.js.
+  storeEnabled: process.env.STORE_ENABLED !== 'false',
+  storePath: resolve(root, process.env.STORE_PATH || 'data/feed.db'),
+  outcomePollSeconds: num(process.env.OUTCOME_POLL_SECONDS, 60),
+  outcomeBatch: num(process.env.OUTCOME_BATCH, 20),
 
   // Local clip extraction. The window is lopsided on purpose: see clip.js.
   clipPre: num(process.env.CLIP_PRE, 25),

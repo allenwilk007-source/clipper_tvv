@@ -150,6 +150,35 @@ export class Twitch {
   }
 
   /**
+   * Re-fetch known clips by id, for outcome polling.
+   *
+   * A clip that has been deleted simply stops coming back. That is not an
+   * error to paper over — a moment whose clips are disappearing is telling you
+   * something, so the caller gets the shrunken list as-is.
+   */
+  async clipsByIds(ids) {
+    const out = [];
+    for (let i = 0; i < ids.length; i += 100) {
+      const page = await this.helix('/clips', { id: ids.slice(i, i + 100) });
+      out.push(...(page.data || []));
+    }
+    return out;
+  }
+
+  /**
+   * The archive VOD for a live channel, so a chat-sourced moment can carry a
+   * real VOD id and be clipped like any other.
+   *
+   * Only called for channels that are actually spiking, and cached by the
+   * caller for the length of the stream, because the id cannot change while
+   * the broadcast is running.
+   */
+  async archiveVideo(userId) {
+    const res = await this.helix('/videos', { user_id: userId, type: 'archive', first: 1 });
+    return res.data?.[0] || null;
+  }
+
+  /**
    * Clips created in a window, across every channel in the category.
    *
    * Helix sorts these by view count, not creation time. With a short window

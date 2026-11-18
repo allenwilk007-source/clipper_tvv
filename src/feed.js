@@ -1,6 +1,13 @@
 import { config } from './config.js';
 import { ChatWatcher } from './chat.js';
-import { clusterClips, scoreMoments } from './moments.js';
+import {
+  chatCandidateMoments,
+  clusterClips,
+  mergeChatCandidates,
+  publicMoments,
+  scoreMoments,
+} from './moments.js';
+import { HORIZONS, openStore } from './store.js';
 import { Twitch } from './twitch.js';
 
 const stamp = () => new Date().toISOString().slice(11, 19);
@@ -19,10 +26,16 @@ export class Feed {
     this.twitch = new Twitch({ log });
     this.chat = config.chatEnabled ? new ChatWatcher({ log }) : null;
 
+    this.store = config.storeEnabled ? openStore(config.storePath, { log }) : null;
+
     this.game = null;
     this.moments = [];
     this.streams = new Map();
     this.previousSaturation = new Map();
+    // login -> {broadcasterId, vodId, startedAt, ...}. The VOD id is looked up
+    // once per spiking channel and kept for the length of that broadcast.
+    this.channels = new Map();
+    this.outcomeCursor = 0;
 
     this.lastClipPoll = null;
     this.lastStreamPoll = null;
@@ -51,6 +64,24 @@ export class Feed {
     this.streams = new Map(streams.map((s) => [s.user_id, s]));
     this.lastStreamPoll = new Date().toISOString();
 
+    // Keep what a chat-only moment needs to describe itself, and keep any VOD
+    // id already resolved for a channel that is still on the same broadcast.
+    const next = new Map();
+    for (const stream of streams) {
+      const login = (stream.user_login || '').toLowerCase();
+      if (!login) continue;
+      const known = this.channels.get(login);
+      next.set(login, {
+        broadcasterId: stream.user_id,
+        displayName: stream.user_name || login,
+        startedAt: stream.started_at,
+        title: stream.title,
+        viewers: stream.viewer_count,
+        vodId: known?.startedAt === stream.started_at ? known.vodId : null,
+      });
+    }
+    this.channels = next;
+
     if (this.chat) {
       const logins = streams
         .slice(0, config.chatChannels)
@@ -75,7 +106,19 @@ export class Feed {
     });
 
     const clustered = clusterClips(clips, { gapSeconds: config.clusterGapSeconds });
-    const scored = scoreMoments(clustered, {
+
+    // Chat spikes that nothing has been clipped from yet. These are the only
+    // rows in the feed that can beat the crowd rather than merely keep up with
+    // it, so they are folded in before scoring, not bolted on after.
+    const candidates = this.chat ? this.chat.candidates({ now }) : [];
+    await this.resolveVodIds(candidates);
+    const withChat = mergeChatCandidates(
+      clustered,
+      chatCandidateMoments(candidates, { channels: this.channels }),
+      { beforeSeconds: 60, afterSeconds: 180 },
+    );
+
+    const scored = scoreMoments(withChat, {
       now,
       chatSpikes: this.chat ? this.chat.spikes() : new Map(),
       streams: this.streams,
@@ -95,6 +138,20 @@ export class Feed {
     this.lastClipPoll = new Date(now).toISOString();
     this.lastError = null;
 
+    if (this.store) {
+      try {
+        this.store.recordPoll({
+          moments: scored,
+          clipsById: new Map(clips.map((clip) => [clip.id, clip])),
+          gameId: this.game?.id || null,
+          at: new Date(now),
+        });
+      } catch (err) {
+        // Bookkeeping must never take the feed down with it.
+        this.log(`store write failed: ${err.message}`);
+      }
+    }
+
     if (truncated) {
       this.log(
         `clip window truncated at ${config.clipMaxPages} pages — raise CLIP_MAX_PAGES or shorten CLIP_WINDOW_MINUTES`,
@@ -104,9 +161,61 @@ export class Feed {
     return scored;
   }
 
+  /**
+   * Give spiking channels a real VOD id so a chat-sourced moment can be
+   * clipped like any other. Only the handful of channels with a live candidate
+   * are looked up, and only once per broadcast, because this is a request per
+   * channel and the rate limit is shared with the thing that matters.
+   */
+  async resolveVodIds(candidates) {
+    for (const candidate of candidates) {
+      const channel = this.channels.get(candidate.login);
+      if (!channel || channel.vodId || channel.vodId === false) continue;
+      if (!channel.broadcasterId) continue;
+      try {
+        const video = await this.twitch.archiveVideo(channel.broadcasterId);
+        // false, not null: a channel that does not store broadcasts should be
+        // asked once, not on every poll for the rest of the stream.
+        channel.vodId = video?.id || false;
+      } catch (err) {
+        this.log(`vod lookup failed for ${candidate.login}: ${err.message}`);
+        channel.vodId = false;
+      }
+    }
+  }
+
+  /**
+   * What became of the moments we saw earlier.
+   *
+   * This is the whole reason the store exists: without an outcome, the ranking
+   * is an opinion. One horizon per tick, round-robin, with a small batch —
+   * nothing here is urgent and the live feed owns the rate limit.
+   */
+  async pollOutcomes() {
+    if (!this.store) return 0;
+    const horizon = HORIZONS[this.outcomeCursor % HORIZONS.length];
+    this.outcomeCursor += 1;
+
+    const due = this.store.dueForOutcome(horizon, { limit: config.outcomeBatch });
+    let checked = 0;
+
+    for (const momentId of due) {
+      const clipIds = this.store.clipIdsFor(momentId);
+      // A chat-only moment that never attracted a clip has nothing to re-poll,
+      // and that emptiness is itself the outcome worth recording.
+      const clips = clipIds.length ? await this.twitch.clipsByIds(clipIds) : [];
+      this.store.recordOutcome({ momentId, horizon, clips });
+      checked += 1;
+    }
+
+    if (checked) this.log(`outcomes: checked ${checked} moments at ${horizon.name}`);
+    return checked;
+  }
+
   async tick(kind) {
     try {
       if (kind === 'streams') await this.pollStreams();
+      else if (kind === 'outcomes') await this.pollOutcomes();
       else await this.pollClips();
     } catch (err) {
       this.lastError = { at: new Date().toISOString(), message: err.message };
@@ -128,22 +237,28 @@ export class Feed {
       setInterval(() => this.tick('clips'), config.clipPollSeconds * 1000),
       setInterval(() => this.tick('streams'), config.streamPollSeconds * 1000),
     );
+    if (this.store) {
+      this.timers.push(
+        setInterval(() => this.tick('outcomes'), config.outcomePollSeconds * 1000),
+      );
+    }
   }
 
   stop() {
     for (const timer of this.timers) clearInterval(timer);
     this.timers = [];
     this.chat?.stop();
+    this.store?.close();
     this.started = false;
   }
 
   snapshot() {
-    const counts = { fresh: 0, warm: 0, flooded: 0 };
+    const counts = { early: 0, fresh: 0, warm: 0, flooded: 0 };
     for (const moment of this.moments) counts[moment.state] += 1;
 
     return {
       game: this.game ? { id: this.game.id, name: this.game.name } : null,
-      moments: this.moments,
+      moments: publicMoments(this.moments),
       meta: {
         counts,
         totalMoments: this.moments.length,
@@ -155,6 +270,7 @@ export class Feed {
         lastStreamPoll: this.lastStreamPoll,
         pollSeconds: config.clipPollSeconds,
         chat: this.chat ? this.chat.status() : { enabled: false },
+        store: this.store ? this.store.counts() : null,
         lastError: this.lastError,
       },
     };
