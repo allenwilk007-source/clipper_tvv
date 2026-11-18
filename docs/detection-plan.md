@@ -320,6 +320,17 @@ asked for scheduled posting, which is theirs to decide. The conditions:
   shorts were mislabelled or broken; posting is the step where that becomes
   someone else's problem rather than a file on disk.
 
+Where this stands: **YouTube is built** (`src/uploader.js`, `src/youtube.js`)
+and **off until the operator switches it on**, after adding their own app's
+keys and connecting. It posts at most 5 a day, three hours apart, choosing
+the best-scoring shorts above the meter's keep line; it re-checks each video
+and rebuilds its tags from its own recorded game at post time; and every
+upload is claimed before it starts, so nothing posts twice. A dry-run mode
+logs a full day's choices without sending anything. **Instagram and TikTok
+are not built**; for those, the panel's buttons still copy the caption and
+open the upload page for the operator to post by hand. Details and setup:
+`docs/posting-setup.md`.
+
 The thing the limits do not cover, and the reason to keep volume deliberate:
 posting another creator's footage to a monetized account is a copyright
 question, and a strike lands on the operator's channel rather than on this
