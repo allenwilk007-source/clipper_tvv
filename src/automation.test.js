@@ -199,3 +199,14 @@ test('lookups failing over and over is an error, with the reason', async () => {
   assert.match(health.message, /failed 6 times in a row \(last: downloader exited with code 3221225794\)/);
   assert.match(health.message, /restart the app/);
 });
+
+test('channels that simply do not record are not a fault', async () => {
+  const { collectorHealth } = await import('./automation.js');
+  // A quiet stretch of subscriber-only and non-archiving channels, plus a
+  // few playing something off the list: correct skips, not breakage.
+  assert.equal(collectorHealth({ skipped: { 'no-vod': 10, 'other-game': 5 } }).level, 'ok');
+  // The same with lookups failing is worth a warning.
+  const failing = collectorHealth({ skipped: { 'no-vod': 10 }, lookups: { consecutive: 2, lastError: 'ETIMEDOUT' } });
+  assert.equal(failing.level, 'warn');
+  assert.match(failing.message, /no recording to cut from, and recording lookups are failing \(ETIMEDOUT\)/);
+});

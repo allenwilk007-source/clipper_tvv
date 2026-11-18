@@ -342,3 +342,8 @@ test('each short records the audio confidence and which window cut it', async ()
   assert.equal(review.window, 'audio');
   store.close();
 });
+
+test('a moment with no recording is "no-vod", not an unreadable game', () => {
+  const { skipped } = select([moment({ vodId: null, game: null })], [], { games: ['Grand Theft Auto VI'] });
+  assert.deepEqual(skipped, { 'no-vod': 1 });
+});

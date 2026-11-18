@@ -214,6 +214,17 @@ export function collectorHealth({ skipped = {}, picks = 0, lookups = {} } = {}) 
         'so new moments cannot be placed or cut. If it does not clear within a few minutes, restart the app.',
     };
   }
+  // Most moments with no recording to cut from is normal (channels that do
+  // not archive, subscriber-only VODs) unless lookups are failing too.
+  const noVod = skipped['no-vod'] || 0;
+  if (failing && considered >= 3 && (noVod + unknown) / considered >= 0.8) {
+    return {
+      level: 'warn',
+      message:
+        `${noVod + unknown} of ${considered} moments have no recording to cut from, ` +
+        `and recording lookups are failing (${String(lookups.lastError).slice(0, 90)})`,
+    };
+  }
   if (considered >= 3 && unknown / considered >= 0.6) {
     return {
       level: 'warn',

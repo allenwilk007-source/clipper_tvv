@@ -407,6 +407,8 @@ export class Store {
             // the cut actually scored: does a confident audio offset clear the
             // redo line more often than a chat-timed one?
             audioZ: review.audioZ ?? null,
+            audioBurst: review.audioBurst ?? null,
+            burst: review.burst ?? null,
             window: review.window ?? null,
           })
         : null,
