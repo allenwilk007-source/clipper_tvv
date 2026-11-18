@@ -61,6 +61,14 @@ export function autoclipConfig(source = process.env) {
     // runs hit 30 inside the hour. The per-channel cap keeps one hot streamer
     // from being the whole folder.
     perHour: num(source.AUTOCLIP_PER_HOUR, 60),
+    // The hourly cap is first-come across the hour, so a moment better than
+    // anything the hour has produced could arrive after it filled and never
+    // be cut — and the uploader can only choose from what was cut. Measured
+    // over 6,069 moments: the best one in the store (opportunity 55.6) was
+    // never cut, and five uncut moments beat the best ever cut (35.3). So a
+    // moment that beats everything already cut this hour gets through anyway,
+    // up to this many an hour on top of the cap.
+    beatsHourPerHour: num(source.AUTOCLIP_BEATS_HOUR_PER_HOUR, 5),
     perChannelPerHour: num(source.AUTOCLIP_PER_CHANNEL_PER_HOUR, 6),
     maxPerPoll: num(source.AUTOCLIP_MAX_PER_POLL, 4),
     settleSeconds: num(source.AUTOCLIP_SETTLE_SECONDS, 30),
@@ -119,13 +127,35 @@ export function momentLogin(moment) {
   return String(fromId || moment?.broadcaster || '').toLowerCase();
 }
 
-export const toCut = (moment, at) => ({
+/**
+ * What a cut is cut from, as a key: the VOD id, or for a channel recorded
+ * live, the channel. Two moments within a few seconds on the same source are
+ * the same moment, whichever id they arrived under.
+ */
+export const sourceOf = (moment) => moment?.vodId || (moment?.live ? `live-${moment.live.login}` : null);
+
+export const toCut = (moment, at, { overCap = false } = {}) => ({
   momentId: moment.id,
-  vodId: moment.vodId,
+  vodId: sourceOf(moment),
   offsetSeconds: cutOffset(moment),
   broadcaster: moment.broadcaster,
+  opportunity: Number.isFinite(moment.opportunity) ? moment.opportunity : null,
+  overCap,
   at,
 });
+
+/**
+ * Whether a moment may pass a full hourly cap: it must beat every cut this
+ * hour whose score is known, and the hour must have exceptions left. Cuts
+ * reloaded after a restart carry no score; with none known there is nothing
+ * to beat, so no exception is made rather than one on a guess.
+ */
+export function beatsTheHour(moment, takenRecently, cfg) {
+  const known = takenRecently.map((cut) => cut.opportunity).filter(Number.isFinite);
+  if (!known.length || !Number.isFinite(moment.opportunity)) return false;
+  if (takenRecently.filter((cut) => cut.overCap).length >= (cfg.beatsHourPerHour ?? 0)) return false;
+  return moment.opportunity > Math.max(...known);
+}
 
 const vodKey = (id) => String(id || '').replace(/^v/, '');
 const who = (name) => String(name || '').toLowerCase();
@@ -143,6 +173,9 @@ export function selectForAutoclip(moments, { now = Date.now(), cuts = [], cfg = 
     skipped[reason] = (skipped[reason] || 0) + 1;
   };
   const picks = [];
+  // Moments let past a full cap this poll (see beatsTheHour).
+  const overCap = new Set();
+  const asCut = (pick) => toCut(pick, now, { overCap: overCap.has(pick.id) });
   const recent = cuts.filter((cut) => now - cut.at < HOUR);
   const ids = new Set(cuts.map((cut) => cut.momentId));
   const channels = new Set((cfg.channels || []).map(who));
@@ -153,15 +186,19 @@ export function selectForAutoclip(moments, { now = Date.now(), cuts = [], cfg = 
   for (const moment of ranked) {
     const offset = cutOffset(moment);
     const reactedAt = Date.parse(moment.firstClipAt);
-    const taken = [...cuts, ...picks.map((pick) => toCut(pick, now))];
-    const takenRecently = [...recent, ...picks.map((pick) => toCut(pick, now))];
+    const taken = [...cuts, ...picks.map(asCut)];
+    const takenRecently = [...recent, ...picks.map(asCut)];
+    const capFull = takenRecently.length >= cfg.perHour;
 
     if (channels.size && !channels.has(momentLogin(moment))) skip('not-automated');
     // Before the game rules: a channel with no recording has no chapters
     // either, and counting that as an unreadable game made a quiet stretch of
     // subscriber-only channels look like a broken collector. "unknown-game"
     // now means only a recording whose game could not be read.
-    else if (!moment.vodId) skip('no-vod');
+    // A channel recorded live has no VOD but can still be cut, once the
+    // recording holds the whole window.
+    else if (!moment.vodId && !moment.live) skip('no-vod');
+    else if (moment.live && !moment.liveReady) skip('settling');
     else if (games.size && !moment.game) skip('unknown-game');
     else if (games.size && !games.has(who(moment.game))) skip('other-game');
     else if (offset == null) skip('no-offset');
@@ -174,22 +211,25 @@ export function selectForAutoclip(moments, { now = Date.now(), cuts = [], cfg = 
       ids.has(moment.id) ||
       taken.some(
         (cut) =>
-          vodKey(cut.vodId) === vodKey(moment.vodId) &&
+          vodKey(cut.vodId) === vodKey(sourceOf(moment)) &&
           Math.abs(cut.offsetSeconds - offset) <= cfg.dedupeSeconds,
       )
     ) {
       skip('already-cut');
     } else if (picks.length >= cfg.maxPerPoll) skip('poll-limit');
-    else if (takenRecently.length >= cfg.perHour) skip('hourly-limit');
+    else if (capFull && !beatsTheHour(moment, takenRecently, cfg)) skip('hourly-limit');
     else if (
       takenRecently.filter((cut) => who(cut.broadcaster) === who(moment.broadcaster)).length >=
       cfg.perChannelPerHour
     ) {
       skip('channel-limit');
-    } else picks.push(moment);
+    } else {
+      if (capFull) overCap.add(moment.id);
+      picks.push(moment);
+    }
   }
 
-  return { picks, skipped };
+  return { picks, skipped, overCap: [...overCap] };
 }
 
 // What the render needs from a moment, copied so a later poll replacing the
@@ -213,12 +253,16 @@ export class AutoClipper {
     enqueue = enqueueClip,
     now = () => Date.now(),
     cfg = autoclipConfig(),
+    // For a channel recorded live: copies the recording around a moment out
+    // of the rolling buffer, so a queued job cannot lose it.
+    snapshotLive = null,
   } = {}) {
     this.store = store;
     this.log = log;
     this.enqueue = enqueue;
     this.now = now;
     this.cfg = cfg;
+    this.snapshotLive = snapshotLive;
     this.cuts = [];
     this.totals = { queued: 0, done: 0, failed: 0 };
     this.lastSkipped = {};
@@ -254,7 +298,7 @@ export class AutoClipper {
     if (interrupted) this.log(`autocollect: ${interrupted} cut(s) were interrupted by the last shutdown`);
     this.cuts = this.store
       .recentAutoclips({ since: this.now() - 24 * HOUR })
-      .map((row) => ({ ...row, at: Date.parse(row.createdAt) }));
+      .map((row) => ({ ...row, overCap: row.overCap === 1, at: Date.parse(row.createdAt) }));
     for (const row of this.store.listAutoclips({ limit: 80 }).reverse()) this.rememberCaption(row.caption);
     return this.cuts.length;
   }
@@ -262,16 +306,24 @@ export class AutoClipper {
   async onPoll(moments) {
     const now = this.now();
     this.cuts = this.cuts.filter((cut) => now - cut.at < 24 * HOUR);
-    const { picks, skipped } = selectForAutoclip(moments, { now, cuts: this.cuts, cfg: this.cfg });
+    const { picks, skipped, overCap } = selectForAutoclip(moments, { now, cuts: this.cuts, cfg: this.cfg });
     this.lastSkipped = skipped;
     this.lastPicks = picks.length;
-    return picks.map((moment) => this.cut(moment, now)).filter(Boolean);
+    // One at a time: a live moment's claim copies its recording first.
+    const jobs = [];
+    for (const moment of picks) {
+      const job = await this.cut(moment, now, { overCap: overCap.includes(moment.id) });
+      if (job) jobs.push(job);
+    }
+    return jobs;
   }
 
-  cut(moment, now) {
+  async cut(moment, now, { overCap = false } = {}) {
     // Provisional: the render replaces it with one about what was said.
     const caption = captionFor(moment, { avoid: this.recentCaptions });
-    const cut = toCut(moment, now);
+    // Marked when it passed a full cap, so the hour's exceptions stay bounded.
+    const cut = toCut(moment, now, { overCap });
+    if (overCap) this.log(`autocollect: ${moment.broadcaster} beats everything cut this hour — cut past the hourly cap`);
 
     // Claimed BEFORE it is queued. If the process dies mid-render the row
     // survives, and the next run knows not to cut this moment again.
@@ -285,8 +337,25 @@ export class AutoClipper {
     this.cuts.push(cut);
     this.totals.queued += 1;
 
-    this.log(`autocollect: cutting ${moment.broadcaster} at ${cut.offsetSeconds}s — "${caption}"`);
+    // A live moment's recording is copied out now, while the buffer still
+    // holds it: the job may wait in the queue longer than the buffer keeps.
+    let live = null;
+    if (moment.live) {
+      try {
+        live = await this.snapshotLive(moment);
+      } catch (err) {
+        this.totals.failed += 1;
+        this.log(`autocollect: ${moment.broadcaster}'s recording could not be kept: ${err.message}`);
+        this.store?.finishAutoclip(moment.id, { status: 'failed', error: err.message });
+        return null;
+      }
+    }
+
+    this.log(
+      `autocollect: cutting ${moment.broadcaster} ${live ? '(live recording)' : `at ${cut.offsetSeconds}s`} — "${caption}"`,
+    );
     return this.enqueue({
+      live,
       vodId: moment.vodId,
       offsetSeconds: cut.offsetSeconds,
       ...(({ pre, post }) => ({ pre, post }))(windowFor(moment, this.cfg)),
@@ -307,7 +376,11 @@ export class AutoClipper {
   settled(moment, job) {
     const ok = job.state === 'done';
     this.totals[ok ? 'done' : 'failed'] += 1;
-    if (ok) this.rememberCaption(job.caption);
+    if (ok) {
+      this.rememberCaption(job.caption);
+      // The description too, so the next one about this channel reads differently.
+      if (job.description) this.rememberCaption(job.description);
+    }
     // No subtitles is a degraded short, not a failed one — but worth saying.
     if (ok && job.speechError) this.log(`autocollect: no subtitles for ${moment.broadcaster}: ${job.speechError}`);
     try {

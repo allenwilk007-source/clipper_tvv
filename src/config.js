@@ -96,6 +96,16 @@ function games() {
 
 // Post-copy tags by game, keyed lowercase. SHORTS_HASHTAGS, when set,
 // replaces these for every game.
+/**
+ * Each game's own tags, and how a title names it. Only a game the clip was
+ * actually recorded in gets its tags: a game that cannot be read gets none,
+ * never a default.
+ */
+export const GAME_TAGS = {
+  'grand theft auto vi': { tags: ['#gta6', '#gtavi'], youtube: '#GTA6', short: 'GTA 6' },
+  fortnite: { tags: ['#fortnite', '#fortniteclips'], youtube: '#Fortnite', short: 'Fortnite' },
+};
+
 export const GAME_HASHTAGS = {
   'grand theft auto vi': '#gta6 #gtavi #gaming #twitch',
   fortnite: '#fortnite #fortniteclips #gaming #twitch',
@@ -151,6 +161,14 @@ export const config = {
   // Only observations are pruned — see pruneOlderThan in store.js for why the
   // moments/clips/outcomes history is kept regardless.
   storePruneDays: num(process.env.STORE_PRUNE_DAYS, 14),
+
+  // Live recording, for channels with no VOD to cut from (see live.js).
+  // Each recording is a 720p stream, about 3-5 Mbit/s down, with a rolling
+  // buffer of RECORD_KEEP_SECONDS on disk (roughly 300 MB at 10 minutes).
+  recording: process.env.RECORDING !== 'off',
+  recordMax: num(process.env.RECORD_MAX, 4),
+  recordKeepSeconds: num(process.env.RECORD_KEEP_SECONDS, 600),
+  recordQuality: num(process.env.RECORD_QUALITY, 720),
 
   // Local clip extraction. The window is lopsided on purpose: see clip.js.
   clipPre: num(process.env.CLIP_PRE, 25),

@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
@@ -9,6 +10,8 @@ import { config, credentialsMissing, nothingToRun, root } from './config.js';
 import { Automation, SHORT_FILE, parseRange } from './automation.js';
 import { Feed } from './feed.js';
 import { acquireLock, lockMessage } from './lock.js';
+import { Uploader } from './uploader.js';
+import * as youtube from './youtube.js';
 
 // Enough for the biggest plausible clip request and nothing like enough to be
 // worth sending as a denial-of-service payload.
@@ -36,6 +39,15 @@ process.on('exit', () => lock.release());
 
 const feed = new Feed();
 const automation = new Automation({ feed, log: (message) => feed.log(message) });
+const uploader = new Uploader({ store: feed.store, dir: automation.dir, log: (message) => feed.log(message) });
+
+// Sign-in round trips in flight: the state Google hands back must be one this
+// server sent, or the callback is someone else's and is refused.
+const signIns = new Map();
+
+function redirect(res, location) {
+  res.writeHead(302, { location, 'cache-control': 'no-store' }).end();
+}
 
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -245,6 +257,66 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // GET  /api/uploads                          -> each platform's upload state
+  // POST /api/uploads {platform, mode}          -> off | dry-run | on
+  // POST /api/uploads {platform, disconnect}    -> forget the sign-in
+  if (url.pathname === '/api/uploads') {
+    if (req.method === 'POST') {
+      try {
+        const body = await readJsonBody(req);
+        if (body.platform !== 'youtube') throw new Error(`${body.platform} upload is not built yet`);
+        if (body.disconnect) {
+          await uploader.setMode('youtube', 'off');
+          await youtube.forgetToken();
+          uploader.state.youtube.connected = false;
+        } else {
+          await uploader.setMode('youtube', body.mode);
+        }
+      } catch (err) {
+        sendJson(res, 400, { error: 'bad_request', message: err.message });
+        return;
+      }
+    }
+    sendJson(res, 200, await uploader.view());
+    return;
+  }
+
+  // GET /auth/youtube -> Google's consent page; /auth/youtube/callback <- back
+  if (url.pathname === '/auth/youtube') {
+    if (!youtube.hasKeys(uploader.keys)) {
+      res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' }).end('Add YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET to .env, then restart.');
+      return;
+    }
+    const state = randomBytes(16).toString('hex');
+    signIns.set(state, Date.now());
+    redirect(res, youtube.authUrl(uploader.keys, state));
+    return;
+  }
+  if (url.pathname === '/auth/youtube/callback') {
+    const state = url.searchParams.get('state') || '';
+    const started = signIns.get(state);
+    signIns.delete(state);
+    if (!started || Date.now() - started > 10 * 60_000) {
+      redirect(res, '/?youtube=expired#uploads');
+      return;
+    }
+    const code = url.searchParams.get('code');
+    if (!code) {
+      redirect(res, `/?youtube=${encodeURIComponent(url.searchParams.get('error') || 'cancelled')}#uploads`);
+      return;
+    }
+    try {
+      await youtube.saveToken(await youtube.exchangeCode(uploader.keys, code));
+      uploader.connected();
+      feed.log('upload: YouTube connected');
+      redirect(res, '/?youtube=connected#uploads');
+    } catch (err) {
+      feed.log(`upload: connecting YouTube failed: ${err.message}`);
+      redirect(res, `/?youtube=${encodeURIComponent(err.message.slice(0, 120))}#uploads`);
+    }
+    return;
+  }
+
   // POST /api/shorts/<file>/reveal  -> opens the folder with the short selected
   const reveal = /^\/api\/shorts\/([^/]+)\/reveal$/.exec(url.pathname);
   if (reveal && req.method === 'POST') {
@@ -316,6 +388,9 @@ server.listen(config.port, async () => {
     if (err.body) console.error(`  ${err.body}`);
   }
   automation.start();
+  await uploader.load();
+  uploader.start();
+  console.log(`  Auto upload: YouTube is ${uploader.settings.youtube.mode}.`);
   console.log(
     `  Automation is ${automation.settings.enabled ? 'ON' : 'off'} for ` +
       `${automation.settings.channels.length} channel(s) - switch it in the page.`,
@@ -323,6 +398,7 @@ server.listen(config.port, async () => {
 });
 
 const shutdown = () => {
+  uploader.stop();
   automation.stop();
   feed.stop();
   server.close(() => process.exit(0));

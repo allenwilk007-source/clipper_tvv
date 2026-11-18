@@ -105,6 +105,34 @@ posting.
 
 ## When the keys are in
 
-Restart the app. The panel will show a **Connect** button for each platform it
-has keys for. Connect signs you in once, and each short's platform button then
-uploads instead of opening the upload page.
+YouTube is built; Instagram and TikTok are not yet.
+
+1. Restart the app. The panel's **Auto upload** box shows YouTube.
+2. Click **Connect**. Google asks you to sign in and allow uploads to your
+   channel, then sends you back to the page. The sign-in is kept in
+   `data/youtube-token.json` (git-ignored). While the Google project is in
+   Testing, it lasts 7 days; when it lapses, uploads stop and the box says
+   so — click Connect again.
+3. Set the mode to **Dry run** first. Everything happens except the upload:
+   it picks, checks and titles shorts at the real pace, and writes each one
+   to `data/upload-dry-run.jsonl`. Read a day of that before going live.
+4. Set it to **On**. From then on, about every three hours it uploads the
+   best short it has, up to five a day.
+
+What it posts, and what it never does:
+
+- **It chooses.** The pipeline makes dozens of shorts a day; YouTube takes
+  about six. Only shorts above the engagement meter's keep line, never one
+  flagged weak, best score first. The rest stay in `clips/ready` for you.
+- **It checks again at post time.** The video is decoded and checked, its
+  game must be one you clip, and its title and tags are rebuilt from its own
+  recorded game. `clips/rejected` is never read.
+- **Never twice.** Each short is claimed before its upload starts, and the
+  claim survives restarts. An upload cut off by a crash is not retried —
+  it may have landed — and the box tells you to check the channel.
+- **Failures:** quota spent stops uploads until midnight Pacific (YouTube's
+  day, not a rolling 24 hours); a lapsed sign-in stops them until you
+  reconnect; a video YouTube refuses is never tried again; only a network or
+  server error is retried, after the spacing.
+- **Nothing pretends to be a person.** Spacing is even, the API is YouTube's
+  own, and the account is yours, signed in by you.

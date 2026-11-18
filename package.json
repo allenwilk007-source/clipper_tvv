@@ -12,6 +12,7 @@
     "check": "node src/check.js",
     "auto": "node src/auto.js",
     "eval": "node src/eval.js",
+    "recopy": "node src/recopy.js",
     "test": "node --test \"src/**/*.test.js\""
   }
 }

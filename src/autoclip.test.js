@@ -116,6 +116,9 @@ test('the hourly cap and the per-channel cap both hold', () => {
 
   const full = Array.from({ length: 6 }, (_, n) => hourAgo(30, `other${n}`, n));
   assert.equal(select([moment()], full).skipped['hourly-limit'], 1);
+  // Cuts with no known score (reloaded after a restart): nothing to beat, so
+  // no exception on a guess.
+  assert.equal(select([moment({ opportunity: 999 })], full).skipped['hourly-limit'], 1);
   // Cuts older than an hour no longer count against it.
   const old = Array.from({ length: 6 }, (_, n) => hourAgo(90, `other${n}`, n));
   assert.equal(select([moment()], old).picks.length, 1);
@@ -346,4 +349,136 @@ test('each short records the audio confidence and which window cut it', async ()
 test('a moment with no recording is "no-vod", not an unreadable game', () => {
   const { skipped } = select([moment({ vodId: null, game: null })], [], { games: ['Grand Theft Auto VI'] });
   assert.deepEqual(skipped, { 'no-vod': 1 });
+});
+
+// --- live-recorded channels ---------------------------------------------------
+
+const liveMoment = (over = {}) =>
+  moment({
+    id: 'chat:ishowspeed:1795036000',
+    broadcaster: 'ishowspeed',
+    vodId: null,
+    offsetSeconds: null,
+    reactionOffsetSeconds: Math.round((NOW - 120_000) / 1000),
+    live: { login: 'ishowspeed', peakAt: NOW - 120_000 },
+    liveReady: true,
+    game: 'grand theft auto vi',
+    ...over,
+  });
+
+test('a channel recorded live is cut without a VOD, once the recording has the window', () => {
+  const ready = select([liveMoment()]);
+  assert.equal(ready.picks.length, 1);
+  const waiting = select([liveMoment({ liveReady: false })]);
+  assert.deepEqual(waiting.skipped, { settling: 1 });
+});
+
+test('two live moments seconds apart on one channel are one moment', () => {
+  const cuts = [{ momentId: 'other', vodId: 'live-ishowspeed', offsetSeconds: Math.round((NOW - 125_000) / 1000), broadcaster: 'ishowspeed', at: NOW - 60_000 }];
+  assert.equal(select([liveMoment()], cuts).skipped['already-cut'], 1);
+});
+
+test("a live moment's recording is copied out when it is claimed", async () => {
+  const { calls, enqueue } = recorder();
+  const snapshots = [];
+  const auto = new AutoClipper({
+    enqueue,
+    now: () => NOW,
+    cfg,
+    snapshotLive: async (m) => {
+      snapshots.push(m.live.login);
+      return { snapshot: { files: [] }, anchorAt: m.live.peakAt, name: 'ishowspeed-1-t000000-x', snapshotDir: 'x' };
+    },
+  });
+  await auto.onPoll([liveMoment()]);
+  assert.deepEqual(snapshots, ['ishowspeed']);
+  assert.equal(calls[0].live.anchorAt, NOW - 120_000);
+  assert.equal(calls[0].vodId, null);
+});
+
+test('a live moment whose recording cannot be kept is failed, not queued', async () => {
+  const { calls, enqueue } = recorder();
+  const auto = new AutoClipper({
+    enqueue,
+    now: () => NOW,
+    cfg,
+    snapshotLive: async () => {
+      throw new Error('the recording does not cover this moment');
+    },
+  });
+  await auto.onPoll([liveMoment()]);
+  assert.equal(calls.length, 0);
+  assert.equal(auto.status().failed, 1);
+});
+
+test('a full hour still lets through a moment better than everything it cut, a few times', () => {
+  const scored = (n, opportunity, extra = {}) => ({
+    momentId: `s${n}`,
+    vodId: `vs${n}`,
+    offsetSeconds: 0,
+    broadcaster: `other${n}`,
+    opportunity,
+    at: NOW - 10 * 60_000,
+    ...extra,
+  });
+  const full = Array.from({ length: 6 }, (_, n) => scored(n, 10 + n)); // best so far: 15
+
+  // Not better than the hour's best: the cap holds.
+  assert.equal(select([moment({ opportunity: 15 })], full).skipped['hourly-limit'], 1);
+  // Better than all of it: through, and marked as over the cap.
+  const better = select([moment({ opportunity: 40 })], full);
+  assert.equal(better.picks.length, 1);
+  assert.deepEqual(better.overCap, ['m1']);
+
+  // Bounded: once the hour has used its exceptions, even a better one waits.
+  const spent = [...full, ...Array.from({ length: 5 }, (_, n) => scored(10 + n, 20 + n, { overCap: true }))];
+  assert.equal(select([moment({ opportunity: 99 })], spent).skipped['hourly-limit'], 1);
+
+  // The per-channel cap still holds for an exception.
+  const busy = [...full, scored(20, 1, { broadcaster: 'xqc' }), scored(21, 1, { broadcaster: 'xqc' })];
+  assert.equal(select([moment({ opportunity: 99 })], busy).skipped['channel-limit'], 1);
+});
+
+test('exceptions to the hourly cap stay bounded across polls', async () => {
+  const { enqueue, calls } = recorder();
+  const auto = new AutoClipper({ enqueue, now: () => NOW, cfg: { ...cfg, perChannelPerHour: 99, maxPerPoll: 99 } });
+  auto.cuts = Array.from({ length: 6 }, (_, n) => ({
+    momentId: `s${n}`,
+    vodId: `vs${n}`,
+    offsetSeconds: 0,
+    broadcaster: `other${n}`,
+    opportunity: 10,
+    at: NOW - 10 * 60_000,
+  }));
+  // Each poll brings one moment better than everything before it.
+  for (let i = 0; i < 8; i += 1) {
+    await auto.onPoll([moment({ id: `big${i}`, vodId: `vb${i}`, broadcaster: `b${i}`, opportunity: 20 + i })]);
+  }
+  assert.equal(calls.length, 5);
+  assert.equal(auto.cuts.filter((c) => c.overCap).length, 5);
+});
+
+test('after a restart, the hour still knows what it cut and what it has to beat', async () => {
+  const store = new Store(':memory:');
+  const busy = { ...cfg, perChannelPerHour: 99, maxPerPoll: 99 };
+  const first = new AutoClipper({ store, enqueue: recorder().enqueue, now: () => NOW, cfg: busy });
+  for (let n = 0; n < 6; n += 1) {
+    await first.onPoll([moment({ id: `a${n}`, vodId: `va${n}`, broadcaster: `c${n}`, opportunity: 10 + n })]);
+  }
+  await first.onPoll([moment({ id: 'over', vodId: 'vover', broadcaster: 'x', opportunity: 50 })]);
+  assert.equal(first.cuts.filter((c) => c.overCap).length, 1);
+
+  // The pre-cut ranking is kept beside each short, for comparing with the meter.
+  assert.equal(store.listAutoclips({ limit: 1 })[0].opportunity, 50);
+
+  const { enqueue, calls } = recorder();
+  const second = new AutoClipper({ store, enqueue, now: () => NOW + 60_000, cfg: busy });
+  second.load();
+  // Not better than the best of the hour (50): held.
+  await second.onPoll([moment({ id: 'meh', vodId: 'vmeh', broadcaster: 'y', opportunity: 30 })]);
+  assert.equal(calls.length, 0);
+  // Better: through, and the earlier exception still counts.
+  await second.onPoll([moment({ id: 'top', vodId: 'vtop', broadcaster: 'z', opportunity: 60 })]);
+  assert.equal(calls.length, 1);
+  assert.equal(second.cuts.filter((c) => c.overCap).length, 2);
 });

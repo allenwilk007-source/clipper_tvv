@@ -465,10 +465,13 @@ const joinLines = (lines) =>
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 
+// Shorts made since the per-platform copy existed carry each platform's text
+// ready-made (p.platforms); older ones are assembled from their pieces.
 const PLATFORMS = {
   tiktok: {
-    url: 'https://www.tiktok.com/upload',
-    text: (p) => joinLines([p.caption, '', p.credit, '', p.tags]),
+    // tiktok.com/upload now bounces to the home page; Studio's upload holds.
+    url: 'https://www.tiktok.com/tiktokstudio/upload',
+    text: (p) => p.platforms?.tiktok || joinLines([p.caption, '', p.credit, '', p.tags]),
     hint: 'Caption copied and TikTok upload opened. Drag the selected file in, paste, post.',
   },
   youtube: {
@@ -476,6 +479,7 @@ const PLATFORMS = {
     // First line is the title (YouTube allows 100 characters), the rest the
     // description. #Shorts in the title is what files a vertical video there.
     text: (p) =>
+      p.platforms?.youtube ||
       joinLines([
         `${p.caption} #Shorts`.slice(0, 100),
         '',
@@ -487,8 +491,11 @@ const PLATFORMS = {
     hint: 'Copied and YouTube upload opened. The first line is the title, the rest the description.',
   },
   instagram: {
+    // The home page on purpose. instagram.com/create/... looks like the upload
+    // page but Instagram routes it as a USERNAME: it opens a stranger's
+    // profile (@create). There is no direct upload URL; click Create.
     url: 'https://www.instagram.com/',
-    text: (p) => joinLines([p.caption, '', p.credit, '', p.tags]),
+    text: (p) => p.platforms?.instagram || joinLines([p.caption, '', p.credit, '', p.tags]),
     hint: 'Caption copied and Instagram opened. Click Create, pick the selected file, paste.',
   },
 };
@@ -543,6 +550,7 @@ const shortCards = new Map();
 
 const CHANNEL_STATES = {
   recording: 'Recording: its moments can be cut',
+  'recording live': 'Recording the live stream: it has no VOD, so its moments are cut from the recording',
   'not recording': 'Not recording: its moments can be watched, not cut',
   listening: 'Listening for a moment',
   live: 'Live in the category',
@@ -605,6 +613,8 @@ function statusLine(view) {
   if (working) parts.push(`${working} rendering`);
   if (s.failed) parts.push(`${s.failed} failed`);
   parts.push(`${s.lastHour} of ${s.perHour} this hour`);
+  const live = view.recordings?.filter((r) => r.state === 'recording').length || 0;
+  if (live) parts.push(`recording ${live} live`);
   const note =
     view.mode === 'chat-only' ? ' · chat-only: a channel has to be recording to be cut' : '';
   return `On · ${parts.join(' · ')}${note}`;
@@ -770,8 +780,71 @@ auto.form.addEventListener('submit', async (event) => {
   if (await changeAutomation({ add: value })) auto.input.value = '';
 });
 
+// --- auto upload ---------------------------------------------------------------
+
+const up = {
+  box: document.getElementById('uploads'),
+  connect: document.getElementById('yt-connect'),
+  mode: document.getElementById('yt-mode'),
+  status: document.getElementById('yt-status'),
+  next: document.getElementById('yt-next'),
+};
+
+const clock = (iso) => new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+function renderUploads(view) {
+  const yt = view.youtube;
+  up.box.hidden = false;
+  up.connect.textContent = !yt.keys ? 'Needs keys in .env' : yt.connected ? 'Connected · reconnect' : 'Connect';
+  up.connect.toggleAttribute('aria-disabled', !yt.keys);
+  if (document.activeElement !== up.mode) up.mode.value = yt.mode;
+  up.mode.querySelector('[value="on"]').disabled = !yt.connected;
+
+  const bits = [];
+  if (yt.mode === 'off') bits.push('Off: nothing is uploaded.');
+  else {
+    bits.push(`${yt.mode === 'dry-run' ? 'Dry run' : 'Uploading'} · ${yt.today} of ${yt.perDay} today`);
+    if (yt.nextAt) bits.push(`next at ${clock(yt.nextAt)}${yt.waitingFor ? ` (${yt.waitingFor})` : ''}`);
+    bits.push(`every ${Math.round(yt.spacingMinutes / 60)}h, best score first`);
+    if (yt.mode === 'on' && yt.privacy !== 'private') bits.push('Google keeps uploads private until its audit passes');
+  }
+  if (yt.lastError) bits.push(`last error: ${yt.lastError}`);
+  up.status.textContent = bits.join(' · ');
+  up.status.classList.toggle('is-error', Boolean(yt.lastError));
+
+  const posted = yt.recent.map((r) => `${r.status === 'dry-run' ? 'would post' : r.status}: ${r.title || r.file}`);
+  const queued = yt.next.map((c) => `next (${c.score}): ${c.title}`);
+  up.next.replaceChildren(
+    ...[...queued.slice(0, 3), ...posted.slice(0, 3)].map((text) => {
+      const li = document.createElement('li');
+      li.textContent = text;
+      li.title = text;
+      return li;
+    }),
+  );
+}
+
+async function pollUploads(change) {
+  try {
+    const res = await fetch('/api/uploads', change ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(change) } : {});
+    const body = await res.json();
+    if (!res.ok) {
+      up.status.textContent = body.message || `upload settings returned ${res.status}`;
+      up.status.classList.add('is-error');
+      return;
+    }
+    renderUploads(body);
+  } catch {
+    /* the server is restarting; the next poll catches up */
+  }
+}
+
+up.mode.addEventListener('change', () => pollUploads({ platform: 'youtube', mode: up.mode.value }));
+
 // ?demo=1 renders a fixture feed, and automation would act on the real one.
 if (!new URLSearchParams(location.search).has('demo')) {
   pollAutomation();
   setInterval(pollAutomation, AUTO_REFRESH_MS);
+  pollUploads();
+  setInterval(pollUploads, AUTO_REFRESH_MS);
 }

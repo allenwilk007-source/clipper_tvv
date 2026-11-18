@@ -31,6 +31,7 @@ import { basename, extname, join, relative } from 'node:path';
 import { config, root } from './config.js';
 import { extractClip } from './clip.js';
 import { FLOOR_SCORE, KEEP_SCORE, bestWindow, measureCut, scoreWindow, shiftWords } from './engagement.js';
+import { cutFromSnapshot } from './live.js';
 import { probe, renderShort, shortformConfig, speechIn } from './shortform.js';
 
 const jobs = new Map();
@@ -101,6 +102,44 @@ async function cutChecked(options) {
 }
 
 /**
+ * One window of a job's moment: from the VOD, or, for a channel with no VOD,
+ * from the snapshot of its live recording taken when the moment was claimed.
+ * Both come back the same shape, so nothing after the cut can tell them apart.
+ */
+async function cutWindow(job, { pre, post, onProgress = () => {}, onRetry = () => {} }) {
+  if (job.live) {
+    const result = await cutFromSnapshot(job.live.snapshot, {
+      anchorAt: job.live.anchorAt,
+      pre,
+      post,
+      dir: job.dir || config.clipDir,
+      name: `${job.live.name}-${pre}-${post}`,
+    });
+    const actual = (await probe(result.path)).duration;
+    // Either way off is wrong: a stream ffmpeg misreads can claim hours.
+    if (!(Math.abs(actual - result.durationSeconds) <= 1.5)) {
+      await rm(result.path, { force: true });
+      throw new Error(`the live recording gave ${actual.toFixed(1)}s of ${result.durationSeconds}s`);
+    }
+    return { ...result, verticalPath: null, measured: actual };
+  }
+  return withRetry(
+    () =>
+      cutChecked({
+        vodId: job.vodId,
+        offsetSeconds: job.offsetSeconds,
+        pre,
+        post,
+        vertical: job.vertical,
+        broadcaster: job.broadcaster,
+        dir: job.dir,
+        onProgress,
+      }),
+    { onRetry },
+  );
+}
+
+/**
  * Speech and signals for one cut, for the meter. One after the other, not at
  * once: in parallel this started transcription (python and ffmpeg) and two
  * more ffmpeg passes together, and with two jobs running that burst of eight
@@ -159,16 +198,7 @@ async function review(job, result, settings) {
     const before = verdict.score;
     job.message = `scored ${before}, under ${KEEP_SCORE}: re-cutting a wider window`;
     try {
-      const wide = await withRetry(() =>
-        cutChecked({
-          vodId: job.vodId,
-          offsetSeconds: job.offsetSeconds,
-          pre: WIDE_PRE,
-          post: WIDE_POST,
-          broadcaster: job.broadcaster,
-          dir: job.dir,
-        }),
-      );
+      const wide = await cutWindow(job, { pre: WIDE_PRE, post: WIDE_POST });
       const wideAnalysis = await analyse(wide.path, settings);
       const anchor = wide.offsetSeconds - wide.start;
       const best = bestWindow({ ...wideAnalysis.measured, words: wideAnalysis.words, chat, duration: wide.measured, anchor, length });
@@ -206,20 +236,12 @@ async function runJob(job) {
     else if (Number.isFinite(seconds)) job.message = `cutting ${Math.round(seconds)}s`;
   };
 
-  const result = await withRetry(
-    () =>
-      cutChecked({
-        vodId: job.vodId,
-        offsetSeconds: job.offsetSeconds,
-        pre: job.pre,
-        post: job.post,
-        vertical: job.vertical,
-        broadcaster: job.broadcaster,
-        dir: job.dir,
-        onProgress: progress,
-      }),
-    { onRetry: (err, attempt) => (job.message = `retrying the cut (${attempt}): ${firstLine(err.message).slice(0, 80)}`) },
-  );
+  const result = await cutWindow(job, {
+    pre: job.pre,
+    post: job.post,
+    onProgress: progress,
+    onRetry: (err, attempt) => (job.message = `retrying the cut (${attempt}): ${firstLine(err.message).slice(0, 80)}`),
+  });
   job.path = result.path;
   job.verticalPath = result.verticalPath;
   job.durationSeconds = result.durationSeconds;
@@ -237,7 +259,10 @@ async function runJob(job) {
           input: cut.path,
           trim: cut.trim,
           // Named after the original cut, so a redo does not change the file.
-          output: join(job.short.dir, `${basename(result.path, extname(result.path))}.mp4`),
+          output: join(
+            job.short.dir,
+            `${job.live ? job.live.name : basename(result.path, extname(result.path))}.mp4`,
+          ),
           moment: job.short.moment,
           start: cut.start,
           reactionAt: cut.reactionAt,
@@ -258,6 +283,7 @@ async function runJob(job) {
     job.shortPath = made.path;
     job.textPath = made.textPath;
     job.caption = made.caption;
+    job.description = made.description || null;
     job.words = made.words;
     job.speechError = made.speechError;
     job.track = made.track;
@@ -291,6 +317,8 @@ function pump() {
       })
       .finally(() => {
         job.finishedAt = new Date().toISOString();
+        // A live moment's copy of the recording, kept or failed alike.
+        if (job.live?.snapshotDir) rm(job.live.snapshotDir, { recursive: true, force: true }).catch(() => {});
         running -= 1;
         trim();
         pump();
@@ -317,6 +345,7 @@ export function enqueueClip({
   dir = undefined,
   short = null,
   onSettled = null,
+  live = null,
 }) {
   const job = {
     id: randomUUID(),
@@ -331,6 +360,7 @@ export function enqueueClip({
     dir,
     short,
     onSettled,
+    live,
     shortPath: null,
     textPath: null,
     caption: null,

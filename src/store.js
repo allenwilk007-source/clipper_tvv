@@ -32,7 +32,7 @@ export const HORIZONS = [
 // fresh database free, but an existing one needs to know what it is already
 // holding — Phase 2 adds columns, and by then there will be launch-week data
 // in here that must not be thrown away to get them.
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 const SCHEMA = `
 create table if not exists moments (
@@ -98,6 +98,25 @@ create table if not exists autoclips (
   finished_at    text
 );
 create index if not exists autoclips_by_created on autoclips(created_at);
+
+-- Every upload of a short to a platform, claimed BEFORE it starts. One row per
+-- (file, platform), so nothing is ever posted twice, restart or not. A row
+-- left 'uploading' by a crash is never retried on its own: the video may have
+-- landed, and a duplicate is found out from the platform, not from here.
+-- Dry runs are kept under their own platform name ('youtube:dry').
+create table if not exists uploads (
+  file        text not null,
+  platform    text not null,
+  status      text not null,   -- uploading | done | failed | refused | uncertain | dry-run
+  video_id    text,
+  title       text,
+  score       integer,
+  error       text,
+  started_at  text not null,
+  finished_at text,
+  primary key (file, platform)
+);
+create index if not exists uploads_by_started on uploads(platform, started_at);
 `;
 
 // node:sqlite refuses to bind `undefined`, and a single missing field would
@@ -160,8 +179,8 @@ export class Store {
       `),
       insertAutoclip: this.db.prepare(`
         insert into autoclips
-          (moment_id, vod_id, offset_seconds, broadcaster, caption, status, created_at)
-        values (?, ?, ?, ?, ?, 'queued', ?)
+          (moment_id, vod_id, offset_seconds, broadcaster, caption, status, created_at, opportunity, over_cap)
+        values (?, ?, ?, ?, ?, 'queued', ?, ?, ?)
         on conflict(moment_id) do nothing
       `),
       // The caption is final only after the render: it can quote what was
@@ -174,7 +193,7 @@ export class Store {
       `),
       recentAutoclips: this.db.prepare(`
         select moment_id as momentId, vod_id as vodId, offset_seconds as offsetSeconds,
-               broadcaster, status, created_at as createdAt
+               broadcaster, status, created_at as createdAt, opportunity, over_cap as overCap
           from autoclips where created_at >= ? order by created_at asc
       `),
       // Same VOD, near the same second: the same moment, whichever copy of
@@ -188,7 +207,7 @@ export class Store {
       `),
       listAutoclips: this.db.prepare(`
         select moment_id as momentId, vod_id as vodId, offset_seconds as offsetSeconds,
-               score, funny, redone, weak, review,
+               score, funny, redone, weak, review, opportunity,
                broadcaster, caption, status, path, error,
                created_at as createdAt, finished_at as finishedAt
           from autoclips order by created_at desc limit ?
@@ -218,20 +237,33 @@ export class Store {
 
     // v2 only added a table, which `create table if not exists` above already
     // handles for old and new databases alike. Column changes go here:
+    const addColumns = (columns) => {
+      const have = new Set(this.db.prepare('pragma table_info(autoclips)').all().map((c) => c.name));
+      for (const [name, type] of columns) {
+        if (!have.has(name)) this.db.exec(`alter table autoclips add column ${name} ${type}`);
+      }
+    };
     // v3: what the engagement meter said about each automated short.
     if (current < 3) {
-      const have = new Set(this.db.prepare('pragma table_info(autoclips)').all().map((c) => c.name));
-      for (const [name, type] of [
+      addColumns([
         ['score', 'integer'],
         ['funny', 'integer'],
         ['redone', 'integer'],
         ['weak', 'integer'],
         ['review', 'text'],
-      ]) {
-        if (!have.has(name)) this.db.exec(`alter table autoclips add column ${name} ${type}`);
-      }
+      ]);
     }
-    // if (current < 4) this.db.exec('alter table moments add column ...');
+    // v4: detection's ranking of the moment when it was cut, beside the
+    // meter's score of the result — a paired record of pre-cut rank against
+    // post-cut judgement on every short, to test whether the ranking predicts
+    // anything. Also lets the hourly cap's exception (autoclip.js) know what
+    // it has to beat after a restart, and how many it has already let past.
+    if (current < 4) {
+      addColumns([
+        ['opportunity', 'real'],
+        ['over_cap', 'integer'],
+      ]);
+    }
 
     if (current !== SCHEMA_VERSION) this.db.exec(`pragma user_version = ${SCHEMA_VERSION}`);
     return SCHEMA_VERSION;
@@ -357,7 +389,17 @@ export class Store {
   }
 
   /** Claim a moment for autocollect. Returns false if it was already claimed. */
-  recordAutoclip({ momentId, vodId, offsetSeconds, broadcaster, caption, at = new Date(), dedupeSeconds = 45 }) {
+  recordAutoclip({
+    momentId,
+    vodId,
+    offsetSeconds,
+    broadcaster,
+    caption,
+    opportunity = null,
+    overCap = false,
+    at = new Date(),
+    dedupeSeconds = 45,
+  }) {
     // Checked and claimed in one locked transaction, so two copies of the app
     // cannot both decide a moment is free. Measured before this: two lirik
     // shorts six seconds apart, cut by two copies under two different ids.
@@ -378,6 +420,8 @@ export class Store {
         nul(broadcaster),
         nul(caption),
         at.toISOString(),
+        real(opportunity),
+        overCap ? 1 : 0,
       );
       this.db.exec('commit');
       return (result.changes ?? 0) > 0;
@@ -433,6 +477,58 @@ export class Store {
   markInterruptedAutoclips({ at = new Date() } = {}) {
     const result = this.db
       .prepare(`update autoclips set status = 'interrupted', finished_at = ? where status = 'queued'`)
+      .run(at.toISOString());
+    return result.changes ?? 0;
+  }
+
+  /** Claim (file, platform) for an upload. False if it was ever claimed before. */
+  claimUpload({ file, platform, title = null, score = null, at = new Date() }) {
+    const result = this.db
+      .prepare(
+        `insert into uploads (file, platform, status, title, score, started_at)
+         values (?, ?, 'uploading', ?, ?, ?)
+         on conflict (file, platform) do update set
+           status = 'uploading', title = excluded.title, score = excluded.score,
+           started_at = excluded.started_at, error = null, finished_at = null
+         -- only a transport failure is ever tried again
+         where uploads.status = 'retry'`,
+      )
+      .run(file, platform, nul(title), int(score), at.toISOString());
+    return (result.changes ?? 0) === 1;
+  }
+
+  finishUpload({ file, platform, status, videoId = null, error = null, at = new Date() }) {
+    this.db
+      .prepare(`update uploads set status = ?, video_id = ?, error = ?, finished_at = ? where file = ? and platform = ?`)
+      .run(status, nul(videoId), nul(error), at.toISOString(), file, platform);
+  }
+
+  /** Uploads to a platform started at or after `since`, oldest first. */
+  uploadsSince(platform, since) {
+    return this.db
+      .prepare(`select * from uploads where platform = ? and started_at >= ? order by started_at asc`)
+      .all(platform, new Date(since).toISOString());
+  }
+
+  uploadedFiles(platform) {
+    return new Set(
+      this.db.prepare("select file from uploads where platform = ? and status != 'retry'").all(platform).map((r) => r.file),
+    );
+  }
+
+  lastUpload(platform) {
+    // Shorts set aside by the checks never reached the platform: no spacing owed.
+    return (
+      this.db
+        .prepare("select * from uploads where platform = ? and status != 'skipped' order by started_at desc limit 1")
+        .get(platform) || null
+    );
+  }
+
+  /** Rows a crash left mid-upload: not retried, shown for a person to check. */
+  markInterruptedUploads({ at = new Date() } = {}) {
+    const result = this.db
+      .prepare(`update uploads set status = 'uncertain', error = 'interrupted mid-upload: check the channel', finished_at = ? where status = 'uploading'`)
       .run(at.toISOString());
     return result.changes ?? 0;
   }
