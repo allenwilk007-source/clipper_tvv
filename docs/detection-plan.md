@@ -287,8 +287,42 @@ A phase that improves neither does not ship, however good the idea sounded.
 
 ## Out of scope, permanently
 
-No multi-account, account rotation, proxying, VPN or IP rotation. No uploading,
-posting or scheduling. The tool indexes, ranks and cuts to local disk; footage
-does not leave the operator's machine through anything built here. That
-boundary is what keeps the legal posture intact and it is not a phase that
-arrives later.
+No multi-account, account rotation, proxying, VPN or IP rotation. No browser
+automation of a posting interface, and nothing whose purpose is to look human
+to a platform — no randomised delays to defeat timing checks, no device or
+fingerprint spoofing, no working around a block.
+
+This is not squeamishness about automation. It is the line between *being a
+client* and *pretending to be a person*. An official API call carries a token
+the account owner granted; there is nothing to detect because nothing is
+disguised. Automation that imitates a human is the kind that loses the account
+it was meant to serve, and it is also the kind that cannot be defended if
+anyone looks. That boundary is not a phase that arrives later.
+
+## Posting: in scope, through official APIs only
+
+Superseding an earlier line here that put all posting out of scope. The
+operator has connected their own TikTok, Instagram and YouTube accounts and
+asked for scheduled posting, which is theirs to decide. The conditions:
+
+- **Official APIs only** — YouTube Data API, Instagram Content Publishing,
+  TikTok Content Posting. If a platform has no API for it, it does not get
+  done another way.
+- **Under the published limits, with margin.** The ceilings are far lower than
+  they look: YouTube's default quota is 10,000 units a day against 1,600 per
+  upload, so about **6 uploads a day**, and a failed upload still spends it.
+  Instagram allows roughly **50 in a rolling 24 hours** and needs a
+  professional account. TikTok restricts an **unaudited client to private
+  posts**, enforced server-side, until the app passes audit.
+- **Stop on rejection, never retry into a limit.** A quota or policy refusal
+  is terminal and gets surfaced; only transport failures retry.
+- **Never post what was quarantined.** The rejected/ sweep exists because six
+  shorts were mislabelled or broken; posting is the step where that becomes
+  someone else's problem rather than a file on disk.
+
+The thing the limits do not cover, and the reason to keep volume deliberate:
+posting another creator's footage to a monetized account is a copyright
+question, and a strike lands on the operator's channel rather than on this
+tool. "Indexes and links, never rehosts" stopped being true the moment clips
+were cut to disk. Saying so here is better than leaving a sentence that
+flatters the posture.
