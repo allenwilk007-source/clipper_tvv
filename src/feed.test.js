@@ -387,3 +387,33 @@ describe('lookup timing', () => {
     assert.equal(lookupDueAt({ archiveCheckedAt: 1000, vodId: '7', retryAt: 5000 }), 5000);
   });
 });
+
+describe('polls that outlast their interval', () => {
+  it('a tick that finds the same poll still running skips instead of stacking', async () => {
+    let release;
+    let lookups = 0;
+    const { feed } = chatOnlyFeed([candidate('caseoh_')], ['caseoh_'], async () => {
+      lookups += 1;
+      await new Promise((resolve) => {
+        release = resolve;
+      });
+      return null;
+    });
+    open = feed;
+    feed.init = async () => {};
+    feed.setWatchList(['caseoh_']);
+
+    const first = feed.tick('chat');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    // The timer fires again while the first poll waits on its slow lookup.
+    await feed.tick('chat');
+    await feed.tick('chat');
+    assert.equal(lookups, 1);
+    assert.equal(feed.skippedTicks.chat, 2);
+
+    release();
+    await first;
+    // Once it has finished, the next tick runs normally.
+    assert.equal(feed.inFlight.has('chat'), false);
+  });
+});
