@@ -424,3 +424,210 @@ els.sort.addEventListener('change', () => {
 
 poll();
 setInterval(poll, REFRESH_MS);
+
+// ---------- channel automation ----------
+//
+// Add a channel, switch it on, and finished shorts appear here. The panel is
+// a view of /api/automation; the server does the work whether or not this page
+// is open.
+
+const AUTO_REFRESH_MS = 5000;
+
+const auto = {
+  root: document.getElementById('auto'),
+  enabled: document.getElementById('auto-enabled'),
+  enabledLabel: document.getElementById('auto-enabled-label'),
+  channels: document.getElementById('auto-channels'),
+  form: document.getElementById('auto-add'),
+  input: document.getElementById('auto-add-input'),
+  error: document.getElementById('auto-error'),
+  status: document.getElementById('auto-status'),
+  shorts: document.getElementById('shorts'),
+  template: document.getElementById('short-template'),
+};
+
+// Kept between refreshes and rebuilt only when that short changed, or a video
+// someone is watching would restart every five seconds.
+const shortCards = new Map();
+
+const CHANNEL_STATES = {
+  recording: 'Recording: its moments can be cut',
+  'not recording': 'Not recording: its moments can be watched, not cut',
+  listening: 'Listening for a moment',
+  live: 'Live in the category',
+  'not live in category': 'Not live in the category',
+};
+
+function showAutoError(message) {
+  auto.error.textContent = message || '';
+  auto.error.hidden = !message;
+}
+
+async function changeAutomation(change) {
+  showAutoError('');
+  try {
+    const res = await fetch('/api/automation', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(change),
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      showAutoError(body.message || `automation returned ${res.status}`);
+      return false;
+    }
+    renderAutomation(body);
+    return true;
+  } catch (err) {
+    showAutoError(err.message);
+    return false;
+  }
+}
+
+function renderChannels(view) {
+  auto.channels.replaceChildren(
+    ...view.channels.map(({ login, state }) => {
+      const chip = document.createElement('span');
+      chip.className = `channel is-${state.replaceAll(' ', '-')}`;
+      chip.title = CHANNEL_STATES[state] || state;
+      const dot = document.createElement('i');
+      const name = document.createElement('span');
+      name.textContent = login;
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.textContent = '×';
+      remove.title = `Stop automating ${login}`;
+      remove.setAttribute('aria-label', `Stop automating ${login}`);
+      remove.addEventListener('click', () => changeAutomation({ remove: login }));
+      chip.append(dot, name, remove);
+      return chip;
+    }),
+  );
+}
+
+function statusLine(view) {
+  const s = view.status;
+  const working = Math.max(0, s.queued - s.done - s.failed);
+  if (!view.channels.length) return 'Add a channel to start.';
+  if (!view.enabled) return 'Switched off. Nothing will be cut until it is on.';
+  const parts = [`${s.done} ready`];
+  if (working) parts.push(`${working} rendering`);
+  if (s.failed) parts.push(`${s.failed} failed`);
+  parts.push(`${s.lastHour} of ${s.perHour} this hour`);
+  const note =
+    view.mode === 'chat-only' ? ' · chat-only: a channel has to be recording to be cut' : '';
+  return `On · ${parts.join(' · ')}${note}`;
+}
+
+const shortKey = (item) => [item.momentId, item.status, item.file].join('|');
+
+function buildShort(item) {
+  const node = auto.template.content.firstElementChild.cloneNode(true);
+  const frame = node.querySelector('.short-frame');
+  const copy = node.querySelector('.short-copy');
+  const download = node.querySelector('.short-download');
+
+  node.querySelector('.short-caption').textContent = item.caption || '(no caption)';
+  const when = new Date(item.finishedAt || item.createdAt);
+  node.querySelector('.short-meta').textContent =
+    `@${item.broadcaster} · ${when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+
+  if (item.file) {
+    const src = `/shorts/${encodeURIComponent(item.file)}`;
+    const video = document.createElement('video');
+    video.src = src;
+    video.controls = true;
+    video.preload = 'metadata';
+    video.playsInline = true;
+    frame.append(video);
+    download.href = `${src}?download=1`;
+  } else {
+    const placeholder = document.createElement('div');
+    placeholder.className = 'short-placeholder';
+    placeholder.textContent =
+      item.status === 'queued'
+        ? 'Cutting…'
+        : item.status === 'failed'
+          ? `Failed: ${item.error || 'unknown error'}`
+          : item.status === 'interrupted'
+            ? 'Interrupted by a restart'
+            : 'File moved or deleted';
+    frame.append(placeholder);
+    node.classList.add(`is-${item.status}`);
+    download.remove();
+  }
+
+  if (item.postText) {
+    copy.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(item.postText);
+        copy.textContent = 'Copied';
+      } catch {
+        copy.textContent = 'Copy failed';
+      }
+      setTimeout(() => {
+        copy.textContent = 'Copy post text';
+      }, 1500);
+    });
+  } else {
+    copy.remove();
+  }
+  return node;
+}
+
+function renderShorts(items) {
+  const wanted = items.map((item) => {
+    const key = shortKey(item);
+    return { key, node: shortCards.get(key) || buildShort(item) };
+  });
+  shortCards.clear();
+  for (const { key, node } of wanted) shortCards.set(key, node);
+
+  // Moving a playing <video> pauses it, so nodes are only ever added, removed
+  // or replaced in place — never re-inserted.
+  const keep = new Set(wanted.map(({ node }) => node));
+  for (const node of [...auto.shorts.children]) if (!keep.has(node)) node.remove();
+  wanted.forEach(({ node }, i) => {
+    const at = auto.shorts.children[i];
+    if (at !== node) auto.shorts.insertBefore(node, at || null);
+  });
+}
+
+function renderAutomation(view) {
+  auto.root.hidden = false;
+  auto.root.classList.toggle('is-on', view.enabled);
+  auto.enabled.checked = view.enabled;
+  auto.enabledLabel.textContent = view.enabled ? 'On' : 'Off';
+  renderChannels(view);
+  auto.status.textContent = statusLine(view);
+  renderShorts(view.shorts);
+}
+
+async function pollAutomation() {
+  try {
+    const res = await fetch('/api/automation');
+    // An older server with no automation: the panel just stays hidden.
+    if (!res.ok) return;
+    renderAutomation(await res.json());
+  } catch {
+    /* the feed poll already reports an unreachable server */
+  }
+}
+
+auto.enabled.addEventListener('change', async () => {
+  const wanted = auto.enabled.checked;
+  if (!(await changeAutomation({ enabled: wanted }))) auto.enabled.checked = !wanted;
+});
+
+auto.form.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const value = auto.input.value.trim();
+  if (!value) return;
+  if (await changeAutomation({ add: value })) auto.input.value = '';
+});
+
+// ?demo=1 renders a fixture feed, and automation would act on the real one.
+if (!new URLSearchParams(location.search).has('demo')) {
+  pollAutomation();
+  setInterval(pollAutomation, AUTO_REFRESH_MS);
+}

@@ -1,0 +1,161 @@
+// node --test src/automation.test.js    (or: npm test)
+//
+// The channel-automation panel: what it accepts, what it refuses, what it
+// serves, and that a change reaches the feed and survives a restart.
+
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { after, test } from 'node:test';
+
+import {
+  Automation,
+  MAX_CHANNELS,
+  SHORT_FILE,
+  applyChange,
+  normalizeLogin,
+  parseRange,
+  sanitizeSettings,
+} from './automation.js';
+
+const scratch = mkdtempSync(join(tmpdir(), 'automation-test-'));
+after(() => rmSync(scratch, { recursive: true, force: true }));
+
+test('a channel can be added however it gets pasted', () => {
+  assert.equal(normalizeLogin('xQc'), 'xqc');
+  assert.equal(normalizeLogin('@CaseOh_'), 'caseoh_');
+  assert.equal(normalizeLogin('https://www.twitch.tv/Lirik'), 'lirik');
+  assert.equal(normalizeLogin('twitch.tv/summit1g/videos?filter=archives'), 'summit1g');
+  assert.equal(normalizeLogin('  m.twitch.tv/shroud  '), 'shroud');
+});
+
+test('things that are not a channel are refused', () => {
+  assert.equal(normalizeLogin(''), null);
+  assert.equal(normalizeLogin('two words'), null);
+  assert.equal(normalizeLogin('a'.repeat(26)), null);
+  // A twitch.tv path that looks like a name and is not one.
+  assert.equal(normalizeLogin('https://www.twitch.tv/videos/2932444934'), null);
+  assert.equal(normalizeLogin('https://www.twitch.tv/directory'), null);
+});
+
+test('the panel adds, removes and switches, and says why when it cannot', () => {
+  const start = { enabled: false, channels: ['xqc'] };
+  assert.deepEqual(applyChange(start, { add: 'twitch.tv/Lirik' }).channels, ['xqc', 'lirik']);
+  // Adding one twice is not two.
+  assert.deepEqual(applyChange(start, { add: 'XQC' }).channels, ['xqc']);
+  assert.deepEqual(applyChange(start, { remove: 'xqc' }).channels, []);
+  assert.equal(applyChange(start, { enabled: true }).enabled, true);
+  // The original is left alone.
+  assert.deepEqual(start, { enabled: false, channels: ['xqc'] });
+
+  assert.throws(() => applyChange(start, { add: 'not a channel!' }), /not a Twitch channel name/);
+  assert.throws(() => applyChange(start, { enabled: 'yes' }), /true or false/);
+  const full = { enabled: true, channels: Array.from({ length: MAX_CHANNELS }, (_, i) => `ch${i}`) };
+  assert.throws(() => applyChange(full, { add: 'onemore' }), /at most/);
+});
+
+test('saved settings are cleaned on the way back in', () => {
+  const fallback = { enabled: false, channels: ['xqc'] };
+  assert.deepEqual(sanitizeSettings({ enabled: true, channels: ['Lirik', 'bad name', 'lirik'] }, fallback), {
+    enabled: true,
+    channels: ['lirik'],
+  });
+  // A missing or broken file falls back rather than throwing.
+  assert.deepEqual(sanitizeSettings(null, fallback), fallback);
+  assert.deepEqual(sanitizeSettings({ enabled: 'on' }, fallback), fallback);
+});
+
+test('/shorts/ serves only the names the renderer makes', () => {
+  assert.ok(SHORT_FILE.test('lirik-2932444934-t021904-20261118T183156Z.mp4'));
+  assert.ok(SHORT_FILE.test('lirik-2932444934-t021904-20261118T183156Z.txt'));
+  assert.ok(!SHORT_FILE.test('../../.env'));
+  assert.ok(!SHORT_FILE.test('..%2F..%2F.env'));
+  assert.ok(!SHORT_FILE.test('feed.db'));
+  assert.ok(!SHORT_FILE.test('lirik-2932444934-t021904-20261118T183156Z.mp4/../x'));
+});
+
+test('a byte range is read the way a <video> asks for it', () => {
+  assert.equal(parseRange(undefined, 1000), null);
+  assert.equal(parseRange('bytes=-', 1000), null);
+  assert.deepEqual(parseRange('bytes=0-', 1000), { start: 0, end: 999 });
+  assert.deepEqual(parseRange('bytes=100-199', 1000), { start: 100, end: 199 });
+  assert.deepEqual(parseRange('bytes=900-5000', 1000), { start: 900, end: 999 });
+  assert.deepEqual(parseRange('bytes=-100', 1000), { start: 900, end: 999 });
+  assert.deepEqual(parseRange('bytes=1000-', 1000), { invalid: true });
+});
+
+function fakeFeed({ chatOnly = true, started = true } = {}) {
+  return {
+    chatOnly,
+    started,
+    store: null,
+    watchChannels: ['xqc', 'caseoh_'],
+    channels: new Map([
+      ['xqc', { vodId: '1', archiveCheckedAt: 1 }],
+      ['caseoh_', { vodId: null, archiveCheckedAt: 1 }],
+    ]),
+    lists: [],
+    setWatchList(list) {
+      this.lists.push(list);
+      this.watchChannels = [...list];
+    },
+  };
+}
+
+const fakeClipper = () => ({
+  cfg: { dir: scratch },
+  channels: null,
+  loaded: false,
+  setChannels(list) {
+    this.channels = list;
+  },
+  load() {
+    this.loaded = true;
+  },
+  status: () => ({ queued: 0, done: 0, failed: 0, lastHour: 0, perHour: 6, skipped: {} }),
+});
+
+test('a fresh install starts switched off, on the watch list it already had', () => {
+  const feed = fakeFeed();
+  const automation = new Automation({ feed, clipper: fakeClipper(), path: join(scratch, 'none.json'), env: {} });
+  assert.equal(automation.settings.enabled, false);
+  assert.deepEqual(automation.settings.channels, ['xqc', 'caseoh_']);
+  // AUTOCLIP=on starts it on.
+  const on = new Automation({ feed, clipper: fakeClipper(), path: join(scratch, 'none.json'), env: { AUTOCLIP: 'on' } });
+  assert.equal(on.settings.enabled, true);
+});
+
+test('a change reaches the feed and the clipper, and survives a restart', async () => {
+  const path = join(scratch, 'automation.json');
+  const feed = fakeFeed();
+  const clipper = fakeClipper();
+  const automation = new Automation({ feed, clipper, path, env: {} });
+
+  automation.update({ add: 'https://twitch.tv/Lirik', enabled: true });
+  // Chat-only listens to exactly these channels, from now.
+  assert.deepEqual(feed.lists.at(-1), ['xqc', 'caseoh_', 'lirik']);
+  assert.deepEqual(clipper.channels, ['xqc', 'caseoh_', 'lirik']);
+
+  const view = await automation.view();
+  assert.equal(view.enabled, true);
+  assert.equal(view.mode, 'chat-only');
+  assert.deepEqual(
+    view.channels.map(({ login, state }) => `${login}:${state}`),
+    ['xqc:recording', 'caseoh_:not recording', 'lirik:listening'],
+  );
+
+  // Restarted: the file wins over the defaults.
+  const again = new Automation({ feed: fakeFeed(), clipper: fakeClipper(), path, env: {} });
+  assert.equal(again.settings.enabled, true);
+  assert.deepEqual(again.settings.channels, ['xqc', 'caseoh_', 'lirik']);
+});
+
+test('with credentials the list decides what is cut, not what is watched', () => {
+  // The full feed watches the whole category; replacing its watch list would
+  // throw away everything Helix found.
+  const feed = fakeFeed({ chatOnly: false });
+  const automation = new Automation({ feed, clipper: fakeClipper(), path: join(scratch, 'full.json'), env: {} });
+  automation.update({ remove: 'xqc' });
+  assert.equal(feed.lists.length, 0);
+});

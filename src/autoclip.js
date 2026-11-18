@@ -5,6 +5,8 @@
 // with no one clicking anything. Each rule is here because of a specific way
 // this goes wrong without it:
 //
+//   * one of your channels — like a channel automation, it clips the channels
+//     you added and nothing else
 //   * a VOD and a position in it — without both there is nothing to cut
 //   * early or fresh only — a flooded moment is already on everyone's feed
 //   * settled — the end of the cut must be SETTLE seconds in the past, or the
@@ -21,10 +23,13 @@
 // because nothing has calibrated the opportunity scale yet; that is what
 // `npm run eval` is for, and until it has spoken a threshold would be a guess
 // presented as a setting.
+//
+// Finding WHERE a chat moment sits in a live recording is the feed's job (see
+// archive.js); by the time a moment reaches here it either has a VOD position
+// or it cannot be cut.
 
 import { join, relative, resolve } from 'node:path';
 
-import { run, splitCommand } from './clip.js';
 import { config, root } from './config.js';
 import { enqueueClip } from './clipjobs.js';
 import { captionFor } from './shortform.js';
@@ -39,6 +44,8 @@ const num = (value, fallback) => {
 
 export function autoclipConfig(source = process.env) {
   return {
+    // Empty means every channel the feed sees. The automation panel fills it.
+    channels: [],
     minScore: num(source.AUTOCLIP_MIN_SCORE, 0),
     states: String(source.AUTOCLIP_STATES ?? 'early,fresh')
       .split(',')
@@ -61,6 +68,16 @@ export function autoclipConfig(source = process.env) {
 export function cutOffset(moment) {
   const value = moment?.reactionOffsetSeconds ?? moment?.offsetSeconds;
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * The channel a moment came from, as a login. A chat moment carries it in its
+ * id; a clip moment only has the display name, which matches the login apart
+ * from case for nearly every channel.
+ */
+export function momentLogin(moment) {
+  const fromId = /^chat:([^:]+):/.exec(String(moment?.id || ''))?.[1];
+  return String(fromId || moment?.broadcaster || '').toLowerCase();
 }
 
 export const toCut = (moment, at) => ({
@@ -89,6 +106,7 @@ export function selectForAutoclip(moments, { now = Date.now(), cuts = [], cfg = 
   const picks = [];
   const recent = cuts.filter((cut) => now - cut.at < HOUR);
   const ids = new Set(cuts.map((cut) => cut.momentId));
+  const channels = new Set((cfg.channels || []).map(who));
 
   const ranked = [...moments].sort((a, b) => (b.opportunity ?? 0) - (a.opportunity ?? 0));
 
@@ -98,7 +116,8 @@ export function selectForAutoclip(moments, { now = Date.now(), cuts = [], cfg = 
     const taken = [...cuts, ...picks.map((pick) => toCut(pick, now))];
     const takenRecently = [...recent, ...picks.map((pick) => toCut(pick, now))];
 
-    if (!moment.vodId) skip('no-vod');
+    if (channels.size && !channels.has(momentLogin(moment))) skip('not-automated');
+    else if (!moment.vodId) skip('no-vod');
     else if (offset == null) skip('no-offset');
     else if (!cfg.states.includes(moment.state)) skip('state');
     else if ((moment.opportunity ?? 0) < cfg.minScore) skip('score');
@@ -127,78 +146,6 @@ export function selectForAutoclip(moments, { now = Date.now(), cuts = [], cfg = 
   return { picks, skipped };
 }
 
-// ---------------------------------------------------------------------------
-// Placing a chat moment on its VOD without credentials
-// ---------------------------------------------------------------------------
-//
-// With no Twitch app the feed cannot look up a channel's VOD, so a chat moment
-// arrives with no vodId and no offset and would be passed over as 'no-vod'
-// for ever — autocollect would run all day and make nothing. yt-dlp finds
-// both with no credentials, in two calls per broadcast:
-//
-//   1. the channel's newest archive id
-//   2. that archive's live_status and timestamp
-//
-// The newest archive is only trusted if it is still RECORDING: a streamer
-// with archiving off has an old VOD at the top of the list, and cutting at
-// "today's offset" into yesterday's broadcast is a random clip, not this
-// moment. Measured on a live channel: the current archive reported is_live,
-// its timestamp was 5s after the stream went live (the VOD's own zero point,
-// which is what offsets are measured from), and its duration matched
-// wall-clock time to within 3s. A finished archive reported was_live.
-
-const LOGIN = /^[a-z0-9_]{1,25}$/;
-
-/** The channel login of a chat moment, from its id (`chat:<login>:<ts>`). */
-export function loginOf(moment) {
-  const login = /^chat:([^:]+):/.exec(String(moment?.id || ''))?.[1]?.toLowerCase();
-  return login && LOGIN.test(login) ? login : null;
-}
-
-/** An archive is usable only while it is recording the broadcast in progress. */
-export function liveArchiveFrom({ id, timestamp, liveStatus }) {
-  const vodId = String(id || '').trim();
-  if (liveStatus !== 'is_live' || !/^v?\d+$/.test(vodId)) return null;
-  if (!Number.isFinite(timestamp) || timestamp <= 0) return null;
-  return { vodId, startedAt: timestamp * 1000 };
-}
-
-/** A copy of a chat moment with its position in the recording filled in. */
-export function placeOnVod(moment, archive) {
-  const peak = Date.parse(moment?.firstClipAt);
-  if (!archive || !Number.isFinite(peak) || peak < archive.startedAt) return null;
-  const offset = Math.round((peak - archive.startedAt) / 1000);
-  return {
-    ...moment,
-    vodId: archive.vodId,
-    offsetSeconds: offset,
-    reactionOffsetSeconds: offset,
-    offsetEstimated: true,
-  };
-}
-
-export async function findLiveArchive(login) {
-  if (!LOGIN.test(login)) return null;
-  const { file, prefix } = splitCommand(config.ytdlpCmd);
-  const first = async (args) =>
-    (await run(file, [...prefix, ...args], { cwd: config.root, label: 'yt-dlp' })).stdout.trim().split(/\r?\n/)[0] || '';
-
-  const id = await first([
-    '--flat-playlist',
-    '--playlist-end',
-    '1',
-    '--print',
-    '%(id)s',
-    `https://www.twitch.tv/${login}/videos?filter=archives&sort=time`,
-  ]);
-  if (!/^v?\d+$/.test(id)) return null;
-
-  const [timestamp, liveStatus] = (
-    await first(['--print', '%(timestamp)s|%(live_status)s', `https://www.twitch.tv/videos/${id.replace(/^v/, '')}`])
-  ).split('|');
-  return liveArchiveFrom({ id, timestamp: Number(timestamp), liveStatus });
-}
-
 // What the render needs from a moment, copied so a later poll replacing the
 // feed's state cannot change a caption halfway through a job.
 const snapshotOf = (moment) => ({
@@ -217,21 +164,20 @@ export class AutoClipper {
     enqueue = enqueueClip,
     now = () => Date.now(),
     cfg = autoclipConfig(),
-    findArchive = findLiveArchive,
   } = {}) {
     this.store = store;
     this.log = log;
     this.enqueue = enqueue;
     this.now = now;
     this.cfg = cfg;
-    this.findArchive = findArchive;
-    // login -> {archive|null, checkedAt}. Looked up once per broadcast, not
-    // once per poll: it is two subprocesses and a request to Twitch each time.
-    this.archives = new Map();
-    this.busy = false;
     this.cuts = [];
     this.totals = { queued: 0, done: 0, failed: 0 };
     this.lastSkipped = {};
+  }
+
+  /** Which channels to clip. Empty means every channel the feed sees. */
+  setChannels(channels = []) {
+    this.cfg = { ...this.cfg, channels: [...channels] };
   }
 
   /** Remember what earlier runs cut, so a restart does not cut it again. */
@@ -249,71 +195,11 @@ export class AutoClipper {
   }
 
   async onPoll(moments) {
-    // A lookup can outlast the gap between polls. Skipping beats stacking:
-    // the next poll carries the same moments.
-    if (this.busy) return [];
-    this.busy = true;
-    try {
-      const now = this.now();
-      this.cuts = this.cuts.filter((cut) => now - cut.at < 24 * HOUR);
-      const placed = await this.place(moments, now);
-      const { picks, skipped } = selectForAutoclip(placed, { now, cuts: this.cuts, cfg: this.cfg });
-      this.lastSkipped = skipped;
-      return picks.map((moment) => this.cut(moment, now)).filter(Boolean);
-    } finally {
-      this.busy = false;
-    }
-  }
-
-  /**
-   * Fill in the VOD position of chat moments the feed could not place. Only
-   * moments that could otherwise be cut are looked up, at most three channels
-   * a poll, so a burst of spikes cannot turn into a burst of requests.
-   */
-  async place(moments, now) {
-    if (!this.findArchive) return moments;
-    let lookups = 0;
-    const placed = [];
-
-    for (const moment of moments) {
-      const login = loginOf(moment);
-      const reactedAt = Date.parse(moment.firstClipAt);
-      const worthIt =
-        login &&
-        (!moment.vodId || cutOffset(moment) == null) &&
-        this.cfg.states.includes(moment.state) &&
-        Number.isFinite(reactedAt) &&
-        now - reactedAt <= this.cfg.maxAgeMinutes * 60_000;
-      if (!worthIt) {
-        placed.push(moment);
-        continue;
-      }
-
-      let entry = this.archives.get(login);
-      // A channel without a recording is asked again after ten minutes, in
-      // case it starts one; one with a recording is re-checked every thirty,
-      // in case the stream ended and a new one began.
-      const ttl = entry?.archive ? 30 * 60_000 : 10 * 60_000;
-      if ((!entry || now - entry.checkedAt > ttl) && lookups < 3) {
-        lookups += 1;
-        let archive = null;
-        try {
-          archive = await this.findArchive(login);
-        } catch (err) {
-          this.log(`autocollect: archive lookup for ${login} failed: ${String(err.message).split('\n')[0]}`);
-        }
-        entry = { archive, checkedAt: now };
-        this.archives.set(login, entry);
-        this.log(
-          archive
-            ? `autocollect: ${login} is recording to ${archive.vodId}`
-            : `autocollect: ${login} has no archive recording right now, so its moments cannot be cut`,
-        );
-      }
-
-      placed.push((entry?.archive && placeOnVod(moment, entry.archive)) || moment);
-    }
-    return placed;
+    const now = this.now();
+    this.cuts = this.cuts.filter((cut) => now - cut.at < 24 * HOUR);
+    const { picks, skipped } = selectForAutoclip(moments, { now, cuts: this.cuts, cfg: this.cfg });
+    this.lastSkipped = skipped;
+    return picks.map((moment) => this.cut(moment, now)).filter(Boolean);
   }
 
   cut(moment, now) {
@@ -370,6 +256,7 @@ export class AutoClipper {
     return {
       ...this.totals,
       lastHour: this.cuts.filter((cut) => now - cut.at < HOUR).length,
+      perHour: this.cfg.perHour,
       dir: relative(root, this.cfg.dir),
       skipped: this.lastSkipped,
     };

@@ -74,13 +74,18 @@ const candidate = (login, { reaction = 8, shared = false, at = Date.now() } = {}
   },
 });
 
-function chatOnlyFeed(candidates, watchChannels = ['caseoh_', 'xqc']) {
+// The real recording lookup runs yt-dlp against Twitch. By default nobody is
+// recording, which is the state every test above this line was written for.
+const nobodyRecording = async () => null;
+
+function chatOnlyFeed(candidates, watchChannels = ['caseoh_', 'xqc'], findArchive = nobodyRecording) {
   const chat = new FakeChat(candidates);
   const feed = new Feed({
     log: () => {},
     chat,
     store: null,
     watchChannels,
+    findArchive,
   });
   feed.twitch = forbiddenTwitch;
   return { feed, chat };
@@ -193,5 +198,58 @@ describe('chat-only mode', () => {
     // The evidence that put the row on screen still has to survive.
     assert.ok(moment.chat);
     assert.equal(moment.chat.classes.clipit.count, 7);
+  });
+});
+
+describe('chat-only mode with a recording in progress', () => {
+  it('places a moment on the live recording, so it can be cut', async () => {
+    const now = Date.now();
+    const lookups = [];
+    const { feed } = chatOnlyFeed([candidate('caseoh_', { at: now })], ['caseoh_', 'xqc'], async (login) => {
+      lookups.push(login);
+      // Recording for the last hour.
+      return { vodId: '77', startedAt: now - 3600_000 };
+    });
+    open = feed;
+
+    await feed.start();
+
+    const [moment] = feed.moments;
+    assert.equal(moment.vodId, '77');
+    // The peak, measured from the recording's own start.
+    assert.ok(Math.abs(moment.offsetSeconds - 3600) <= 1, `offset ${moment.offsetSeconds}`);
+    assert.equal(moment.reactionOffsetSeconds, moment.offsetSeconds);
+    assert.match(moment.deepLink, /^https:\/\/www\.twitch\.tv\/videos\/77\?t=/);
+    // Only the channel that spiked was looked up.
+    assert.deepEqual(lookups, ['caseoh_']);
+  });
+
+  it('looks a channel up once per broadcast, not once per poll', async () => {
+    let asked = 0;
+    const { feed } = chatOnlyFeed([candidate('caseoh_')], ['caseoh_'], async () => {
+      asked += 1;
+      return null;
+    });
+    open = feed;
+
+    await feed.start();
+    await feed.pollChat();
+    await feed.pollChat();
+    assert.equal(asked, 1);
+  });
+
+  it('keeps a recording it already found when the watch list is edited', async () => {
+    const now = Date.now();
+    const { feed } = chatOnlyFeed([candidate('caseoh_', { at: now })], ['caseoh_'], async () => ({
+      vodId: '77',
+      startedAt: now - 60_000,
+    }));
+    open = feed;
+
+    await feed.start();
+    feed.setWatchList(['caseoh_', 'lirik']);
+    assert.equal(feed.channels.get('caseoh_').vodId, '77');
+    assert.equal(feed.channels.get('lirik').vodId, null);
+    assert.deepEqual(feed.watchChannels, ['caseoh_', 'lirik']);
   });
 });

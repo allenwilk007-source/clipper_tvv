@@ -66,11 +66,11 @@ test('a clip title beats the hook, but a chat-only moment leads with what chat d
   );
   // A chat-only moment only has the stream title, which is about the whole
   // broadcast, so the evidence from chat goes first.
-  assert.equal(captionFor({ source: 'chat', title: 'GTA 6 DAY 1 | !merch', chat: laughing }), 'CHAT LOST IT');
+  assert.equal(captionFor({ source: 'chat', title: 'GTA 6 DAY 1 | !merch', chat: laughing }), 'Chat lost it');
   assert.equal(captionFor({ source: 'chat', title: 'GTA 6 DAY 1 | !merch', chat: null }), 'GTA 6 DAY 1');
   assert.equal(
     captionFor({ source: 'chat', broadcaster: 'xQc', title: '', chat: null }, { game: 'Grand Theft Auto VI' }),
-    'XQC IN GRAND THEFT AUTO VI',
+    'xQc in Grand Theft Auto VI',
   );
 });
 
@@ -112,6 +112,31 @@ test('a source with no audio maps video only', () => {
   assert.ok(args.includes('-an'));
   assert.ok(!graphOf(args).includes('[0:a]'));
   assert.ok(!args.includes('[a]'));
+});
+
+test('the reel look: black canvas, the hook sitting right on top of the picture', () => {
+  const graph = graphOf(shortformArgs(ARGS));
+  assert.match(graph, /pad=1080:1920:0:656:color=black/);
+  assert.ok(!graph.includes('gblur'), 'the reel look has no blurred fill');
+  // A 16:9 picture spans 656..1264. The hook ends 48px above it and the
+  // credit starts 48px below it.
+  assert.match(graph, /y=608-text_h/);
+  assert.match(graph, /y=1312/);
+  // White on black needs no outline.
+  assert.ok(!graph.includes('borderw'), 'no outline on the reel look');
+});
+
+test('the hook follows the picture for a source that is not 16:9', () => {
+  // A 4:3 frame is taller, so the picture starts higher and the hook with it.
+  const graph = graphOf(shortformArgs({ ...ARGS, sourceWidth: 1440, sourceHeight: 1080 }));
+  assert.match(graph, /scale=1080:810,pad=1080:1920:0:554/);
+  assert.match(graph, /y=506-text_h/);
+});
+
+test('the blur look is still there when asked for', () => {
+  const graph = graphOf(shortformArgs({ ...ARGS, style: 'blur' }));
+  assert.match(graph, /gblur/);
+  assert.match(graph, /y=h\*0\.17-text_h\/2/);
 });
 
 test('no credit line is drawn when the name has nothing the font can draw', () => {

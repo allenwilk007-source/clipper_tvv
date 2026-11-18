@@ -1,10 +1,12 @@
+import { createReadStream } from 'node:fs';
 import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, sep } from 'node:path';
 
 import { clipWindow, normalizeVodId } from './clip.js';
 import { clipQueueStatus, enqueueClip, getClipJob, publicJob } from './clipjobs.js';
 import { config, credentialsMissing, nothingToRun, root } from './config.js';
+import { Automation, SHORT_FILE, parseRange } from './automation.js';
 import { Feed } from './feed.js';
 
 // Enough for the biggest plausible clip request and nothing like enough to be
@@ -23,6 +25,7 @@ const TYPES = {
 };
 
 const feed = new Feed();
+const automation = new Automation({ feed, log: (message) => feed.log(message) });
 
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -85,6 +88,49 @@ async function sendStatic(res, urlPath) {
     }
     res.writeHead(500).end('server error');
   }
+}
+
+/**
+ * A finished short, for the automation panel. Only names clipBasename makes
+ * are served, and only from the shorts folder. Ranges are honoured because a
+ * <video> element cannot seek without them.
+ */
+async function sendShort(req, res, name, download) {
+  if (!SHORT_FILE.test(name)) {
+    res.writeHead(404).end('not found');
+    return;
+  }
+  const path = join(automation.dir, name);
+  let size;
+  try {
+    size = (await stat(path)).size;
+  } catch {
+    res.writeHead(404).end('not found');
+    return;
+  }
+  const headers = {
+    'content-type': name.endsWith('.mp4') ? 'video/mp4' : 'text/plain; charset=utf-8',
+    'accept-ranges': 'bytes',
+    'cache-control': 'no-cache',
+  };
+  if (download) headers['content-disposition'] = `attachment; filename="${name}"`;
+
+  const range = parseRange(req.headers.range, size);
+  if (range?.invalid) {
+    res.writeHead(416, { 'content-range': `bytes */${size}` }).end();
+    return;
+  }
+  if (range) {
+    res.writeHead(206, {
+      ...headers,
+      'content-length': range.end - range.start + 1,
+      'content-range': `bytes ${range.start}-${range.end}/${size}`,
+    });
+    createReadStream(path, { start: range.start, end: range.end }).pipe(res);
+    return;
+  }
+  res.writeHead(200, { ...headers, 'content-length': size });
+  createReadStream(path).pipe(res);
 }
 
 const server = createServer(async (req, res) => {
@@ -171,6 +217,35 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // GET  /api/automation                     -> channels, switch, finished shorts
+  // POST /api/automation {enabled|add|remove}  -> the same, after the change
+  if (url.pathname === '/api/automation') {
+    if (req.method === 'POST') {
+      try {
+        automation.update(await readJsonBody(req));
+      } catch (err) {
+        sendJson(res, 400, { error: 'bad_request', message: err.message });
+        return;
+      }
+    } else if (req.method !== 'GET') {
+      sendJson(res, 405, { error: 'method_not_allowed', message: 'GET or POST' });
+      return;
+    }
+    sendJson(res, 200, await automation.view());
+    return;
+  }
+
+  if (url.pathname.startsWith('/shorts/')) {
+    let name = '';
+    try {
+      name = decodeURIComponent(url.pathname.slice('/shorts/'.length));
+    } catch {
+      /* malformed escape: falls through to 404 */
+    }
+    await sendShort(req, res, name, url.searchParams.has('download'));
+    return;
+  }
+
   if (url.pathname === '/api/status') {
     sendJson(res, 200, {
       ok: !nothingToRun,
@@ -203,21 +278,30 @@ server.listen(config.port, async () => {
   }
 
   if (credentialsMissing) {
-    console.log(`  No credentials - chat-only on ${config.watchChannels.length} channels.`);
+    console.log(`  No credentials - chat-only on ${automation.settings.channels.length || config.watchChannels.length} channels.`);
     console.log('  Finding moments before anybody clips them is the half that works');
     console.log('  without a token. Saturation is the half that does not.');
     console.log('');
   }
 
+  // Before the feed starts: in chat-only mode the automation's channels are
+  // the watch list, and what was already cut has to be known before a poll.
+  automation.prepare();
   try {
     await feed.start();
   } catch (err) {
     console.error(`  Could not start the feed: ${err.message}`);
     if (err.body) console.error(`  ${err.body}`);
   }
+  automation.start();
+  console.log(
+    `  Automation is ${automation.settings.enabled ? 'ON' : 'off'} for ` +
+      `${automation.settings.channels.length} channel(s) - switch it in the page.`,
+  );
 });
 
 const shutdown = () => {
+  automation.stop();
   feed.stop();
   server.close(() => process.exit(0));
   // Don't hang forever on a stuck socket.

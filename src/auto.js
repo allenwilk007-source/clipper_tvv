@@ -1,26 +1,29 @@
 // npm run auto
 //
-// The feed and autocollect together, headless, until stopped. Finished shorts
-// land in clips/ready/ as an .mp4 with a .txt of post copy beside it.
+// Channel automation with no page open: the feed and the automation the web
+// server runs, headless and switched on, until stopped. Finished shorts land
+// in clips/ready/ as an .mp4 with a .txt of post copy beside it.
 //
-// It is its own entry point rather than a flag on the web server so it can run
-// unattended with nothing open. Do not run it alongside `npm start`: each
-// starts its own feed, and two feeds spend the Twitch rate limit twice.
+// It uses the same channels as the panel (data/automation.json). Run it
+// instead of `npm start`, not beside it: each starts its own feed, and two
+// feeds spend the Twitch rate limit — and the chat sockets — twice.
 
 import { relative } from 'node:path';
 
 import { credentialsMissing, root } from './config.js';
-import { AutoClipper } from './autoclip.js';
+import { Automation } from './automation.js';
 import { clipQueueStatus } from './clipjobs.js';
 import { Feed } from './feed.js';
 
 const SUMMARY_MS = 10 * 60_000;
 
 const feed = new Feed();
-const auto = new AutoClipper({ store: feed.store, log: feed.log });
+const automation = new Automation({ feed, log: feed.log });
+// Headless means nobody is there to flip the switch.
+automation.settings.enabled = true;
 
 function summary() {
-  const { done, failed, queued, lastHour, skipped } = auto.status();
+  const { done, failed, queued, lastHour, skipped } = automation.clipper.status();
   const queue = clipQueueStatus();
   const reasons = Object.entries(skipped)
     .sort((a, b) => b[1] - a[1])
@@ -34,10 +37,10 @@ function summary() {
 }
 
 async function main() {
-  const remembered = auto.load();
+  automation.prepare();
   feed.log(
-    `autocollect: finished shorts go to ${relative(root, auto.cfg.dir)}` +
-      (remembered ? ` · ${remembered} earlier cut(s) remembered` : ''),
+    `autocollect: ${automation.settings.channels.length} channel(s), finished shorts go to ` +
+      relative(root, automation.dir),
   );
 
   try {
@@ -45,28 +48,20 @@ async function main() {
   } catch (err) {
     console.error(`\n  Could not start the feed: ${err.message}`);
     if (credentialsMissing) {
-      console.error('  TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET are empty in .env.');
-      console.error('  Register an app at https://dev.twitch.tv/console/apps — see the README.\n');
+      console.error('  No Twitch credentials, and the chat-only path could not start either.');
+      console.error('  Check WATCH_CHANNELS in .env, or see the README.\n');
     }
     feed.stop();
     process.exit(1);
   }
 
-  // The feed replaces its moments array on every poll, so a new array is a
-  // new poll. Watching for that keeps this decoupled from how the feed
-  // schedules itself.
-  let seen = null;
-  setInterval(() => {
-    if (!feed.moments || feed.moments === seen) return;
-    seen = feed.moments;
-    auto.onPoll(feed.moments).catch((err) => feed.log(`autocollect: poll failed: ${err.message}`));
-  }, 2000);
-
+  automation.start();
   setInterval(summary, SUMMARY_MS);
 }
 
 const shutdown = () => {
   summary();
+  automation.stop();
   feed.stop();
   process.exit(0);
 };

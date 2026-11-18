@@ -172,6 +172,12 @@ export class Store {
                broadcaster, status, created_at as createdAt
           from autoclips where created_at >= ? order by created_at asc
       `),
+      listAutoclips: this.db.prepare(`
+        select moment_id as momentId, vod_id as vodId, offset_seconds as offsetSeconds,
+               broadcaster, caption, status, path, error,
+               created_at as createdAt, finished_at as finishedAt
+          from autoclips order by created_at desc limit ?
+      `),
       counts: this.db.prepare(`
         select
           (select count(*) from moments) as moments,
@@ -337,6 +343,11 @@ export class Store {
 
   finishAutoclip(momentId, { status, path = null, error = null, at = new Date() }) {
     this.q.finishAutoclip.run(status, nul(path), nul(error), at.toISOString(), momentId);
+  }
+
+  /** Newest first: what the automation panel lists. */
+  listAutoclips({ limit = 24 } = {}) {
+    return this.q.listAutoclips.all(Math.max(1, Math.round(limit)));
   }
 
   recentAutoclips({ since }) {

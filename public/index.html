@@ -43,7 +43,52 @@
 
     <div class="mode-banner" id="mode" hidden></div>
 
+    <section class="auto" id="auto" hidden>
+      <div class="auto-head">
+        <div>
+          <h2>Channel automation</h2>
+          <p class="auto-sub">
+            Every time one of these channels has a moment, it is cut, captioned
+            and rendered as a 9:16 short. Nothing is posted for you.
+          </p>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="auto-enabled" />
+          <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+          <span class="switch-label" id="auto-enabled-label">Off</span>
+        </label>
+      </div>
+      <div class="auto-channels" id="auto-channels"></div>
+      <form class="auto-add" id="auto-add">
+        <input
+          id="auto-add-input"
+          type="text"
+          placeholder="Add a channel: name or twitch.tv link"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <button type="submit">Add channel</button>
+      </form>
+      <p class="auto-error" id="auto-error" hidden></p>
+      <p class="auto-status" id="auto-status"></p>
+      <div class="shorts" id="shorts"></div>
+    </section>
+
     <main id="feed" class="feed"></main>
+
+    <template id="short-template">
+      <article class="short">
+        <div class="short-frame"></div>
+        <div class="short-body">
+          <p class="short-caption"></p>
+          <p class="short-meta"></p>
+          <div class="short-actions">
+            <button type="button" class="short-copy">Copy post text</button>
+            <a class="short-download" download>Download</a>
+          </div>
+        </div>
+      </article>
+    </template>
 
     <template id="card-template">
       <article class="card">

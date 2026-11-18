@@ -7,6 +7,7 @@ import {
   publicMoments,
   scoreMoments,
 } from './moments.js';
+import { findLiveArchive } from './archive.js';
 import { HORIZONS, openStore } from './store.js';
 import { Twitch } from './twitch.js';
 
@@ -26,8 +27,11 @@ export class Feed {
    * real IRC sockets the moment it is given a channel, so a test of the
    * chat-only path has to be able to hand in one that does not.
    */
-  constructor({ log = defaultLog, chat, store, watchChannels } = {}) {
+  constructor({ log = defaultLog, chat, store, watchChannels, findArchive } = {}) {
     this.log = log;
+    // Where a watched channel is recording, found without credentials. Tests
+    // inject a stand-in, since the real one runs yt-dlp against Twitch.
+    this.findArchive = findArchive !== undefined ? findArchive : findLiveArchive;
     this.twitch = new Twitch({ log });
     this.chat =
       chat !== undefined ? chat : config.chatEnabled ? new ChatWatcher({ log }) : null;
@@ -95,17 +99,24 @@ export class Feed {
    * back to the live channel, and no local clip extraction until a VOD exists.
    */
   setWatchList(logins = this.watchChannels) {
+    this.watchChannels = [...logins];
+    // The header reads this, and the automation panel can change the list.
+    if (this.chatOnly && this.game) this.game.name = `${this.watchChannels.length} watched channels`;
     const next = new Map();
     for (const login of logins) {
       const key = String(login).toLowerCase();
       if (!key) continue;
+      // Editing the list must not forget a recording already found: that is a
+      // lookup per channel, and the channel is still on the same broadcast.
+      const known = this.channels.get(key);
       next.set(key, {
         broadcasterId: null,
-        displayName: this.channels.get(key)?.displayName || key,
-        startedAt: null,
+        displayName: known?.displayName || key,
+        startedAt: known?.startedAt ?? null,
         title: '',
         viewers: null,
-        vodId: null,
+        vodId: known?.vodId ?? null,
+        archiveCheckedAt: known?.archiveCheckedAt ?? null,
       });
     }
     this.channels = next;
@@ -126,6 +137,9 @@ export class Feed {
   async pollChat() {
     const now = Date.now();
     const candidates = this.chat ? this.chat.candidates({ now }) : [];
+    // Before scoring, so a channel that turns out to be recording gets a real
+    // VOD position on this pass rather than the next one.
+    await this.placeLiveRecordings(candidates, now);
 
     const scored = scoreMoments(
       chatCandidateMoments(candidates, { channels: this.channels }),
@@ -157,6 +171,50 @@ export class Feed {
     }
 
     return scored;
+  }
+
+  /**
+   * Fill in, for each spiking channel, the recording it is streaming to.
+   *
+   * Chat-only has no Helix, so no stream start and no VOD id, and without them
+   * a moment can be watched but not cut. archive.js finds both anonymously.
+   * Stored as the channel's startedAt and vodId, chatCandidateMoments then
+   * places the moment itself — and since the start used is the RECORDING's
+   * own zero point, the offset is a position in that VOD.
+   *
+   * At most three channels a poll, and once per broadcast: re-checked after
+   * thirty minutes when found (the stream may have ended and restarted), and
+   * after ten when not (it may have started recording).
+   */
+  async placeLiveRecordings(candidates, now = Date.now()) {
+    if (!this.findArchive) return;
+    let lookups = 0;
+    for (const login of new Set(candidates.map((candidate) => candidate.login))) {
+      const channel = this.channels.get(login);
+      if (!channel) continue;
+      const ttl = channel.vodId ? 30 * 60_000 : 10 * 60_000;
+      if (channel.archiveCheckedAt && now - channel.archiveCheckedAt < ttl) continue;
+      if (lookups >= 3) break;
+      lookups += 1;
+      channel.archiveCheckedAt = now;
+
+      let archive = null;
+      try {
+        archive = await this.findArchive(login);
+      } catch (err) {
+        this.log(`recording lookup failed for ${login}: ${String(err.message).split(/\r?\n/)[0]}`);
+      }
+      const before = channel.vodId;
+      channel.vodId = archive?.vodId || null;
+      channel.startedAt = archive ? new Date(archive.startedAt).toISOString() : null;
+      if (channel.vodId !== before) {
+        this.log(
+          archive
+            ? `${login} is recording to ${archive.vodId} — its moments can be cut`
+            : `${login} has no recording in progress — its moments can be watched, not cut`,
+        );
+      }
+    }
   }
 
   async pollStreams() {

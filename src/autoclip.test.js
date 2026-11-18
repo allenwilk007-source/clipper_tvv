@@ -6,15 +6,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import {
-  AutoClipper,
-  autoclipConfig,
-  cutOffset,
-  liveArchiveFrom,
-  loginOf,
-  placeOnVod,
-  selectForAutoclip,
-} from './autoclip.js';
+import { AutoClipper, autoclipConfig, cutOffset, momentLogin, selectForAutoclip } from './autoclip.js';
 import { Store } from './store.js';
 
 const NOW = Date.parse('2026-11-19T21:00:00Z');
@@ -186,102 +178,37 @@ test('the store refuses to claim the same moment twice', () => {
   store.close();
 });
 
-// --- placing chat moments without credentials --------------------------------
+// --- channel automation -------------------------------------------------------
 
-const VOD_START = NOW - 3600_000; // the recording began an hour ago
-
-const chatMoment = (over = {}) =>
-  moment({
-    id: 'chat:lirik:1795018400',
-    broadcaster: 'LIRIK',
-    source: 'chat',
-    state: 'early',
-    vodId: null,
-    offsetSeconds: null,
-    reactionOffsetSeconds: null,
-    ...over,
-  });
-
-test('a chat moment names its channel; a clip moment does not', () => {
-  assert.equal(loginOf(chatMoment()), 'lirik');
-  assert.equal(loginOf(moment({ id: '123:vod:1000' })), null);
-  // Only a valid login ever reaches a URL.
-  assert.equal(loginOf({ id: 'chat:../../x:1' }), null);
+test('a moment names its channel, from a chat id or a display name', () => {
+  assert.equal(momentLogin({ id: 'chat:caseoh_:1795018400', broadcaster: 'CaseOh' }), 'caseoh_');
+  assert.equal(momentLogin({ id: '123:vod:1000', broadcaster: 'xQc' }), 'xqc');
 });
 
-test('only an archive that is still recording is trusted', () => {
-  // Measured: the current recording reports is_live, a finished one was_live.
-  // An old VOD at the top of the list (archiving switched off for today) would
-  // put "today's offset" into yesterday's broadcast.
-  assert.deepEqual(liveArchiveFrom({ id: 'v1', timestamp: 1000, liveStatus: 'is_live' }), {
-    vodId: 'v1',
-    startedAt: 1_000_000,
-  });
-  assert.equal(liveArchiveFrom({ id: 'v1', timestamp: 1000, liveStatus: 'was_live' }), null);
-  assert.equal(liveArchiveFrom({ id: 'v1', timestamp: NaN, liveStatus: 'is_live' }), null);
-  assert.equal(liveArchiveFrom({ id: 'NA', timestamp: 1000, liveStatus: 'is_live' }), null);
+test('with channels added, only those channels are clipped', () => {
+  const { picks, skipped } = select(
+    [moment({ id: 'a', broadcaster: 'xQc' }), moment({ id: 'b', broadcaster: 'shroud', vodId: 'v9' })],
+    [],
+    { channels: ['xqc'] },
+  );
+  assert.deepEqual(picks.map((m) => m.id), ['a']);
+  assert.equal(skipped['not-automated'], 1);
 });
 
-test('a chat peak is placed by its distance from the start of the recording', () => {
-  const archive = { vodId: 'v77', startedAt: VOD_START };
-  const placed = placeOnVod(chatMoment(), archive);
-  // The peak was two minutes ago, an hour into the recording.
-  assert.equal(placed.vodId, 'v77');
-  assert.equal(placed.reactionOffsetSeconds, 3480);
-  assert.equal(placed.offsetSeconds, 3480);
-  assert.equal(placed.offsetEstimated, true);
-  assert.equal(placed.source, 'chat');
-  // A peak from before this recording began belongs to some other broadcast.
-  assert.equal(placeOnVod(chatMoment(), { vodId: 'v77', startedAt: NOW }), null);
+test('with no channels added, every channel the feed sees is fair game', () => {
+  const { picks } = select([moment({ id: 'a' }), moment({ id: 'b', broadcaster: 'shroud', vodId: 'v9' })]);
+  assert.equal(picks.length, 2);
 });
 
-test('with no credentials a chat moment is placed on the live recording and cut', async () => {
-  const lookups = [];
-  const findArchive = async (login) => {
-    lookups.push(login);
-    return { vodId: 'v77', startedAt: VOD_START };
-  };
+test('the channel list can be changed while running', async () => {
   const { calls, enqueue } = recorder();
-  const auto = new AutoClipper({ enqueue, now: () => NOW, cfg, findArchive });
+  const auto = new AutoClipper({ enqueue, now: () => NOW, cfg });
+  auto.setChannels(['shroud']);
+  await auto.onPoll([moment()]);
+  assert.equal(calls.length, 0);
+  assert.equal(auto.lastSkipped['not-automated'], 1);
 
-  await auto.onPoll([chatMoment()]);
+  auto.setChannels(['xqc']);
+  await auto.onPoll([moment()]);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].vodId, 'v77');
-  assert.equal(calls[0].offsetSeconds, 3480);
-
-  // Looked up once per broadcast, not once per poll.
-  await auto.onPoll([chatMoment({ id: 'chat:lirik:1795019000', firstClipAt: new Date(NOW - 60_000).toISOString() })]);
-  assert.deepEqual(lookups, ['lirik']);
-});
-
-test('a channel that is not recording is asked once, not every poll', async () => {
-  let asked = 0;
-  const auto = new AutoClipper({
-    enqueue: recorder().enqueue,
-    now: () => NOW,
-    cfg,
-    findArchive: async () => {
-      asked += 1;
-      return null;
-    },
-  });
-  await auto.onPoll([chatMoment()]);
-  await auto.onPoll([chatMoment()]);
-  assert.equal(asked, 1);
-  assert.equal(auto.lastSkipped['no-vod'], 1);
-});
-
-test('a moment the feed already placed is never looked up', async () => {
-  let asked = 0;
-  const auto = new AutoClipper({
-    enqueue: recorder().enqueue,
-    now: () => NOW,
-    cfg,
-    findArchive: async () => {
-      asked += 1;
-      return null;
-    },
-  });
-  await auto.onPoll([chatMoment({ vodId: 'v5', offsetSeconds: 100, reactionOffsetSeconds: 100 })]);
-  assert.equal(asked, 0);
 });

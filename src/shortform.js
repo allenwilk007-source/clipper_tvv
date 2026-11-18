@@ -29,18 +29,36 @@ import { formatClipTimestamp, run, verticalFilter } from './clip.js';
 
 const env = process.env;
 
-const DEFAULT_FONT =
-  process.platform === 'win32'
-    ? 'C:/Windows/Fonts/seguibl.ttf' // Segoe UI Black: heavy, legible at phone size
-    : '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
+// Two looks:
+//
+//   reel  the format clippers post most: solid black, the whole frame across
+//         the middle, plain white text sitting right on top of the picture.
+//         Default, because it is what the reference reel does and what reads
+//         as native on the feed.
+//   blur  a zoomed, blurred copy fills the canvas behind the frame, with an
+//         outlined caption in the band above.
+//
+// Neither crops: in GTA the thing worth clipping is as often at the edge of
+// frame as in the middle.
+const FONTS = {
+  win32: {
+    reel: 'C:/Windows/Fonts/segoeuib.ttf', // Segoe UI Bold: the reel's weight
+    blur: 'C:/Windows/Fonts/seguibl.ttf', // Segoe UI Black: holds up over busy blur
+  },
+  other: '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+};
 
-export const shortformConfig = () => ({
-  font: env.SHORTS_FONT || DEFAULT_FONT,
-  hashtags: (env.SHORTS_HASHTAGS ?? '#gta6 #gtavi #gaming #twitch').trim(),
-  // Short-form platforms normalise loudness on their side; delivering near
-  // their target means the clip is not turned down, or up into the noise.
-  loudness: Number(env.SHORTS_LUFS) || -14,
-});
+export const shortformConfig = () => {
+  const style = env.SHORTS_STYLE === 'blur' ? 'blur' : 'reel';
+  return {
+    style,
+    font: env.SHORTS_FONT || (process.platform === 'win32' ? FONTS.win32[style] : FONTS.other),
+    hashtags: (env.SHORTS_HASHTAGS ?? '#gta6 #gtavi #gaming #twitch').trim(),
+    // Short-form platforms normalise loudness on their side; delivering near
+    // their target means the clip is not turned down, or up into the noise.
+    loudness: Number(env.SHORTS_LUFS) || -14,
+  };
+};
 
 // ---------------------------------------------------------------------------
 // Caption text
@@ -126,12 +144,14 @@ export function wrapCaption(text, { maxChars = 16, maxLines = 3 } = {}) {
 
 // What chat was doing, said the way a caption would say it. Only used when it
 // is backed by evidence: a class has to have actually spiked to be named.
+// Sentence case, as the reel writes its hook: it reads as a person talking
+// rather than a banner.
 export const REACTION_HOOKS = {
-  clipit: 'CHAT SAID CLIP IT',
-  funny: 'CHAT LOST IT',
-  shock: 'WAIT WHAT',
-  hype: "LET'S GO",
-  tension: 'OH NO',
+  clipit: 'Chat said clip it',
+  funny: 'Chat lost it',
+  shock: 'Wait what',
+  hype: "Let's go",
+  tension: 'Oh no',
 };
 
 /** The reaction class that spiked hardest, or null if none clearly did. */
@@ -161,9 +181,10 @@ export function captionFor(moment, { game = config.gameName } = {}) {
   const pick = chatOnly ? hook || title : title || hook;
   if (pick) return pick;
 
-  const who = cleanCaption(moment?.broadcaster).toUpperCase();
-  const what = String(game || '').toUpperCase();
-  return who ? `${who} IN ${what}`.trim() : what || 'WATCH THIS';
+  const who = cleanCaption(moment?.broadcaster);
+  const what = String(game || '').trim();
+  if (who && what) return `${who} in ${what}`;
+  return who || what || 'Watch this';
 }
 
 /** The on-screen credit. Empty when the name has nothing the font can draw. */
@@ -237,26 +258,57 @@ export function shortformArgs({
   width = 1080,
   height = 1920,
   loudness = -14,
+  style = 'reel',
+  sourceWidth = 1920,
+  sourceHeight = 1080,
 }) {
   const fontfile = escapeFilterPath(font);
-  const titleSize = Math.round(width * 0.07);
-  const creditSize = Math.round(width * 0.041);
-  const outline = Math.max(2, Math.round(width * 0.0065));
+  const text = (path) => `drawtext=fontfile=${fontfile}:textfile=${escapeFilterPath(path)}:expansion=none`;
 
-  // The title sits in the middle of the blurred band above the picture,
-  // clear of the "Following | For You" strip at the very top. The credit sits
-  // just under the picture, above the description overlay at the bottom.
-  const title =
-    `drawtext=fontfile=${fontfile}:textfile=${escapeFilterPath(captionPath)}:expansion=none` +
-    `:text_align=C:fontsize=${titleSize}:fontcolor=white:borderw=${outline}:bordercolor=black` +
-    `:line_spacing=${Math.round(titleSize * 0.14)}:x=(w-text_w)/2:y=h*0.17-text_h/2`;
-  const credit = creditPath
-    ? `,drawtext=fontfile=${fontfile}:textfile=${escapeFilterPath(creditPath)}:expansion=none` +
-      `:fontsize=${creditSize}:fontcolor=white:borderw=${Math.max(2, outline - 2)}:bordercolor=black` +
-      `:x=(w-text_w)/2:y=h*0.70`
-    : '';
+  let base;
+  let title;
+  let credit = '';
 
-  const base = verticalFilter({ width, height });
+  if (style === 'blur') {
+    const titleSize = Math.round(width * 0.07);
+    const outline = Math.max(2, Math.round(width * 0.0065));
+    base = verticalFilter({ width, height });
+    // The title sits in the middle of the blurred band above the picture,
+    // clear of the "Following | For You" strip at the very top. The credit
+    // sits just under the picture, above the description overlay.
+    title =
+      `${text(captionPath)}:text_align=C:fontsize=${titleSize}:fontcolor=white` +
+      `:borderw=${outline}:bordercolor=black:line_spacing=${Math.round(titleSize * 0.14)}` +
+      `:x=(w-text_w)/2:y=h*0.17-text_h/2`;
+    if (creditPath) {
+      credit =
+        `,${text(creditPath)}:fontsize=${Math.round(width * 0.041)}:fontcolor=white` +
+        `:borderw=${Math.max(2, outline - 2)}:bordercolor=black:x=(w-text_w)/2:y=h*0.70`;
+    }
+  } else {
+    // The reel: the full frame across the middle of a black canvas, the hook
+    // sitting directly on top of the picture and the credit directly under
+    // it. Anchoring both to the picture's edges needs the picture's height,
+    // which is why the source is probed first; a guess would float the text
+    // off the frame for anything that is not exactly 16:9.
+    const aspect =
+      sourceWidth > 0 && sourceHeight > 0 ? sourceHeight / sourceWidth : 9 / 16;
+    const pictureH = Math.min(height, Math.round((width * aspect) / 2) * 2);
+    const pictureTop = Math.floor((height - pictureH) / 4) * 2;
+    const gap = Math.round(height * 0.025);
+    const titleSize = Math.round(width * 0.062);
+
+    base = `scale=${width}:${pictureH},pad=${width}:${height}:0:${pictureTop}:color=black,setsar=1`;
+    title =
+      `${text(captionPath)}:text_align=C:fontsize=${titleSize}:fontcolor=white` +
+      `:line_spacing=${Math.round(titleSize * 0.16)}:x=(w-text_w)/2:y=${pictureTop - gap}-text_h`;
+    if (creditPath) {
+      credit =
+        `,${text(creditPath)}:fontsize=${Math.round(width * 0.037)}:fontcolor=0xBDBDBD` +
+        `:x=(w-text_w)/2:y=${pictureTop + pictureH + gap}`;
+    }
+  }
+
   const chains = [`[0:v]${base}[base]`, `[base]${title}${credit}[v]`];
   // loudnorm works internally at 192 kHz and hands that rate on unless told
   // otherwise, which some players and upload pipelines reject outright.
@@ -287,16 +339,24 @@ export function shortformArgs({
   ];
 }
 
-async function hasAudioStream(input) {
+/** Whether the cut has audio, and the picture's size, in one probe. */
+async function probeSource(input) {
   try {
     const { stdout } = await run(
       'ffprobe',
-      ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index', '-of', 'csv=p=0', input],
+      ['-v', 'error', '-show_entries', 'stream=codec_type,width,height', '-of', 'json', input],
       { cwd: config.root, label: 'ffprobe' },
     );
-    return stdout.trim().length > 0;
+    const streams = JSON.parse(stdout).streams || [];
+    const video = streams.find((stream) => stream.codec_type === 'video') || {};
+    return {
+      hasAudio: streams.some((stream) => stream.codec_type === 'audio'),
+      width: Number(video.width) || 1920,
+      height: Number(video.height) || 1080,
+    };
   } catch {
-    return true; // let ffmpeg give the real error if the file is unreadable
+    // Let ffmpeg give the real error if the file is unreadable.
+    return { hasAudio: true, width: 1920, height: 1080 };
   }
 }
 
@@ -328,7 +388,10 @@ export async function renderShort({
   // appears in the folder someone is picking finished posts out of.
   const captionPath = join(workDir, `${stem}.caption.txt`);
   const creditPath = credit ? join(workDir, `${stem}.credit.txt`) : null;
-  await writeFile(captionPath, wrapCaption(caption).join('\n'), 'utf8');
+  // The reel's hook lines run to about twenty characters; the blur style's
+  // heavier, outlined face needs a shorter line to clear the side buttons.
+  const maxChars = settings.style === 'blur' ? 16 : 20;
+  await writeFile(captionPath, wrapCaption(caption, { maxChars }).join('\n'), 'utf8');
   if (creditPath) await writeFile(creditPath, credit, 'utf8');
 
   // Rendered beside the source and moved into place only once complete. A
@@ -338,14 +401,18 @@ export async function renderShort({
   const partialText = join(workDir, `${stem}.rendering.txt`);
 
   try {
+    const source = await probeSource(input);
     const args = shortformArgs({
       input,
       output: partial,
       captionPath,
       creditPath,
       font: settings.font,
-      hasAudio: await hasAudioStream(input),
+      hasAudio: source.hasAudio,
       loudness: settings.loudness,
+      style: settings.style,
+      sourceWidth: source.width,
+      sourceHeight: source.height,
     });
     onProgress({ stage: 'short', percent: 0, message: 'rendering short' });
     await run('ffmpeg', args, {
