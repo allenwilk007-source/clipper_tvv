@@ -116,6 +116,9 @@ test('the hourly cap and the per-channel cap both hold', () => {
 
   const full = Array.from({ length: 6 }, (_, n) => hourAgo(30, `other${n}`, n));
   assert.equal(select([moment()], full).skipped['hourly-limit'], 1);
+  // Cuts with no known score (reloaded after a restart): nothing to beat, so
+  // no exception on a guess.
+  assert.equal(select([moment({ opportunity: 999 })], full).skipped['hourly-limit'], 1);
   // Cuts older than an hour no longer count against it.
   const old = Array.from({ length: 6 }, (_, n) => hourAgo(90, `other${n}`, n));
   assert.equal(select([moment()], old).picks.length, 1);
@@ -406,4 +409,51 @@ test('a live moment whose recording cannot be kept is failed, not queued', async
   await auto.onPoll([liveMoment()]);
   assert.equal(calls.length, 0);
   assert.equal(auto.status().failed, 1);
+});
+
+test('a full hour still lets through a moment better than everything it cut, a few times', () => {
+  const scored = (n, opportunity, extra = {}) => ({
+    momentId: `s${n}`,
+    vodId: `vs${n}`,
+    offsetSeconds: 0,
+    broadcaster: `other${n}`,
+    opportunity,
+    at: NOW - 10 * 60_000,
+    ...extra,
+  });
+  const full = Array.from({ length: 6 }, (_, n) => scored(n, 10 + n)); // best so far: 15
+
+  // Not better than the hour's best: the cap holds.
+  assert.equal(select([moment({ opportunity: 15 })], full).skipped['hourly-limit'], 1);
+  // Better than all of it: through, and marked as over the cap.
+  const better = select([moment({ opportunity: 40 })], full);
+  assert.equal(better.picks.length, 1);
+  assert.deepEqual(better.overCap, ['m1']);
+
+  // Bounded: once the hour has used its exceptions, even a better one waits.
+  const spent = [...full, ...Array.from({ length: 5 }, (_, n) => scored(10 + n, 20 + n, { overCap: true }))];
+  assert.equal(select([moment({ opportunity: 99 })], spent).skipped['hourly-limit'], 1);
+
+  // The per-channel cap still holds for an exception.
+  const busy = [...full, scored(20, 1, { broadcaster: 'xqc' }), scored(21, 1, { broadcaster: 'xqc' })];
+  assert.equal(select([moment({ opportunity: 99 })], busy).skipped['channel-limit'], 1);
+});
+
+test('exceptions to the hourly cap stay bounded across polls', async () => {
+  const { enqueue, calls } = recorder();
+  const auto = new AutoClipper({ enqueue, now: () => NOW, cfg: { ...cfg, perChannelPerHour: 99, maxPerPoll: 99 } });
+  auto.cuts = Array.from({ length: 6 }, (_, n) => ({
+    momentId: `s${n}`,
+    vodId: `vs${n}`,
+    offsetSeconds: 0,
+    broadcaster: `other${n}`,
+    opportunity: 10,
+    at: NOW - 10 * 60_000,
+  }));
+  // Each poll brings one moment better than everything before it.
+  for (let i = 0; i < 8; i += 1) {
+    await auto.onPoll([moment({ id: `big${i}`, vodId: `vb${i}`, broadcaster: `b${i}`, opportunity: 20 + i })]);
+  }
+  assert.equal(calls.length, 5);
+  assert.equal(auto.cuts.filter((c) => c.overCap).length, 5);
 });
