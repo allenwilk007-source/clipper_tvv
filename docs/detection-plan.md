@@ -178,6 +178,54 @@ Flag, never block. The operator decides.
 
 ---
 
+## Settled: a signal can rank without detecting
+
+Keep these two questions apart. They sound alike, they have different answers,
+and conflating them cost a working signal most of an evening.
+
+> **Detection** — does this signal tell a moment from ordinary stream?
+> **Ranking** — among moments something else already nominated, does it sort
+> the good from the bad?
+
+Stream audio is the worked example. Asked as detection, it fails: over 29
+chat-nominated moments compared against a random offset in the *same* VOD, the
+nominated one was the louder of the pair 14 times — 48%, against 50% by chance
+(`src/audiocontrol.js`). Audio cannot find a moment.
+
+Asked as ranking, it is the strongest single signal in hand ratings: Spearman
+0.62 against rated clip quality, where chat alone manages 0.31. The mechanism
+is specific and worth remembering — chat fires at story cutscenes where
+nothing happens on screen, and in a story-heavy game that is not a rare edge
+case. Audio does not, which is exactly why it adds information chat has not
+already given.
+
+Both results are true. A signal can be useless for finding moments and the
+best thing available for ordering them, because ranking is conditional on a
+nomination that has already happened. **A negative detection result is not a
+verdict on ranking, and a control group built without a notion of quality
+cannot speak to quality at all.** The audio control had no idea what a good
+clip was; it was never going to.
+
+The practical rule: before concluding a signal is worthless, check which of
+the two questions the experiment actually asked.
+
+## Height is not position
+
+A second distinction, same family, learned the same way. How *loud* a peak is
+and how well it locates the moment are separate claims, and the first does not
+imply the second.
+
+The plan was to trust an audio-derived cut point when the burst was large.
+Measured over 45 moments, the rate at which the audio peak precedes the chat
+offset is flat across every threshold: 67% at a 4 dB floor, 68% at 9 dB, 69%
+at 12 dB. A loud burst is no better placed than a quiet one, so a confidence
+gate built on height is a number standing in for an argument.
+
+Whatever gates the cut point has to be a property that bears on *placement* —
+whether the window held one event or several, say — and it has to show a
+gradient before it ships. `src/audiolag.js` prints the lead rate for each
+candidate gate so a flat column is visible rather than assumed.
+
 ## How to tell if any of this worked
 
 One number, re-run every phase against the same held-out history:

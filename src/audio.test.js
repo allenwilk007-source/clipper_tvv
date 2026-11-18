@@ -90,6 +90,51 @@ describe('peakOf', () => {
   });
 });
 
+describe('peak isolation', () => {
+  const at = (t, m) => ({ t, m });
+  const quiet = (from, count, value = -40) =>
+    Array.from({ length: count }, (_, i) => at(from + i * 0.1, value));
+
+  it('is large when one event stands alone in the window', () => {
+    const samples = [...quiet(0, 100), at(10, -12), ...quiet(10.1, 100)];
+    const peak = peakOf(samples, { windowStart: 0 });
+    // Nothing else within 5s comes near it.
+    assert.equal(peak.isolation, 28);
+  });
+
+  it('is small when the window is loud in several places', () => {
+    // Three comparable bursts: the maximum is one of them more or less by
+    // accident, so the window says almost nothing about where the moment was.
+    const samples = [
+      ...quiet(0, 50),
+      at(5, -13),
+      ...quiet(5.1, 50),
+      at(12, -12),
+      ...quiet(12.1, 50),
+      at(20, -13.5),
+      ...quiet(20.1, 50),
+    ];
+    const peak = peakOf(samples, { windowStart: 0 });
+    assert.equal(peak.loudness, -12);
+    assert.equal(peak.isolation, 1);
+  });
+
+  it('does not compare the peak with its own 400ms window', () => {
+    // ebur128's momentary loudness slides, so samples either side of a peak
+    // are largely the same sound. Counting one as a rival would report every
+    // peak as unisolated.
+    const samples = [...quiet(0, 50), at(5.0, -12), at(5.1, -12.4), at(5.2, -13), ...quiet(5.3, 50)];
+    const peak = peakOf(samples, { windowStart: 0 });
+    assert.equal(peak.isolation, 28);
+  });
+
+  it('reports nothing when the window is too short to hold a rival', () => {
+    const samples = [at(0, -30), at(0.1, -20), at(0.2, -25)];
+    const peak = peakOf(samples, { windowStart: 0 });
+    assert.equal(peak.isolation, null);
+  });
+});
+
 describe('audioWindow', () => {
   it('is symmetric, so a peak lands either side by chance half the time', () => {
     const window = audioWindow(500, { before: 30, after: 30 });
