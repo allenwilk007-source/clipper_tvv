@@ -22,6 +22,7 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { probeLoudnessAt } from './audio.js';
 import { config } from './config.js';
@@ -168,8 +169,16 @@ async function main() {
   console.log('');
 }
 
-main().catch((err) => {
-  console.error('');
-  console.error(`${err.name}: ${err.message}`);
-  process.exitCode = 1;
-});
+// Only run when invoked as a script. Without this, importing the module to
+// test one of its pure helpers starts the whole experiment — which is how the
+// first version of audiocontrol.test.js came to spawn yt-dlp.
+const invokedDirectly =
+  process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (invokedDirectly) {
+  main().catch((err) => {
+    console.error('');
+    console.error(`${err.name}: ${err.message}`);
+    process.exitCode = 1;
+  });
+}
