@@ -74,6 +74,29 @@ export function autoclipConfig(source = process.env) {
 }
 
 /** The VOD position a cut is built around: where people reacted. */
+/**
+ * How much to cut either side of the offset, by where the offset came from.
+ *
+ * The default 25s before and 5s after is built for a CHAT offset: chat
+ * reacts after the thing happens, so the moment sits well before it. An
+ * AUDIO offset — set by detection only when the stream's audio peak clears a
+ * confidence floor — is the moment itself, about 7s earlier (measured median
+ * lag between audio peak and chat). Cutting 25/5 around it would leave only
+ * five seconds of aftermath and put the payoff 83% of the way in; 22/8 keeps
+ * the reaction and lands the payoff about three quarters in, where the
+ * engagement meter's re-centring found it reads best.
+ */
+export const AUDIO_WINDOW = { pre: 22, post: 8 };
+
+export function windowFor(moment, { pre, post } = {}) {
+  const audio = moment?.audioOffsetSeconds;
+  const fromAudio =
+    typeof audio === 'number' &&
+    Number.isFinite(audio) &&
+    moment?.reactionOffsetSeconds === audio;
+  return fromAudio ? { ...AUDIO_WINDOW, source: 'audio' } : { pre, post, source: 'chat' };
+}
+
 export function cutOffset(moment) {
   const value = moment?.reactionOffsetSeconds ?? moment?.offsetSeconds;
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
@@ -167,6 +190,7 @@ const snapshotOf = (moment) => ({
   vodId: moment.vodId,
   title: moment.title,
   game: moment.game || null,
+  audioZ: Number.isFinite(moment.audioZ) ? moment.audioZ : null,
   chat: moment.chat ? { classes: moment.chat.classes } : null,
 });
 
@@ -253,8 +277,7 @@ export class AutoClipper {
     return this.enqueue({
       vodId: moment.vodId,
       offsetSeconds: cut.offsetSeconds,
-      pre: this.cfg.pre,
-      post: this.cfg.post,
+      ...(({ pre, post }) => ({ pre, post }))(windowFor(moment, this.cfg)),
       broadcaster: moment.broadcaster,
       momentId: moment.id,
       dir: this.cfg.workDir,
@@ -281,7 +304,9 @@ export class AutoClipper {
         path: job.shortPath,
         error: ok ? null : job.message,
         caption: ok ? job.caption : null,
-        review: job.review || null,
+        review: job.review
+          ? { ...job.review, audioZ: moment.audioZ ?? null, window: windowFor(moment, this.cfg).source }
+          : null,
       });
     } catch (err) {
       this.log(`autocollect: could not record the result for ${moment.id}: ${err.message}`);

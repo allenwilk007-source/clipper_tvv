@@ -54,6 +54,10 @@ export class Feed {
     // How recording lookups are going, so a collector that has stopped being
     // able to place anything says so instead of looking healthy.
     this.lookups = { failures: 0, consecutive: 0, lastError: null, lastErrorAt: null, lastOkAt: null };
+    // Which kinds of poll are running now, and how many ticks found one still
+    // going (see tick()).
+    this.inFlight = new Set();
+    this.skippedTicks = {};
     this.twitch = new Twitch({ log });
     this.chat =
       chat !== undefined ? chat : config.chatEnabled ? new ChatWatcher({ log }) : null;
@@ -544,6 +548,17 @@ export class Feed {
   }
 
   async tick(kind) {
+    // A poll that outlasts its interval — a slow recording lookup, a slow
+    // audio probe — must not have the next one start on top of it: they are
+    // timers, not a queue. Overlapping polls run their subprocesses in
+    // parallel (the process bursts Windows refuses to start, 3221225794) and
+    // race on the feed's state. So a poll still running is left to finish,
+    // and the skipped tick is counted rather than stacked.
+    if (this.inFlight.has(kind)) {
+      this.skippedTicks[kind] = (this.skippedTicks[kind] || 0) + 1;
+      return;
+    }
+    this.inFlight.add(kind);
     try {
       if (kind === 'streams') await this.pollStreams();
       else if (kind === 'outcomes') await this.pollOutcomes();
@@ -552,6 +567,8 @@ export class Feed {
     } catch (err) {
       this.lastError = { at: new Date().toISOString(), message: err.message };
       this.log(`${kind} poll failed: ${err.message}`);
+    } finally {
+      this.inFlight.delete(kind);
     }
   }
 
