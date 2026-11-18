@@ -31,6 +31,7 @@ import { basename, dirname, extname, join, resolve } from 'node:path';
 
 import { GAME_HASHTAGS, config } from './config.js';
 import { formatClipTimestamp, run, splitCommand, verticalFilter } from './clip.js';
+import { validateShort } from './validate.js';
 
 const env = process.env;
 
@@ -60,6 +61,8 @@ export const shortformConfig = () => {
     loudness: Number(env.SHORTS_LUFS) || -14,
     censor: env.SHORTS_CENSOR !== 'off',
     subtitles: env.SHORTS_SUBTITLES !== 'off',
+    // The streamer's camera on top, when a webcam can be found in the clip.
+    facecam: env.SHORTS_FACECAM !== 'off',
     speechModel: env.SUBTITLES_MODEL || 'base.en',
     python: env.PYTHON_CMD || 'python',
     musicDir: resolve(config.root, env.SHORTS_MUSIC_DIR || 'music'),
@@ -452,7 +455,16 @@ export function pictureBox({ width = 1080, height = 1920, sourceWidth = 1920, so
  * the picture, where they cover neither the game's HUD nor the platform's
  * description overlay at the very bottom; the credit goes under them.
  */
-export function layoutFor({ style = 'reel', width = 1080, height = 1920, sourceWidth, sourceHeight, subtitles = true } = {}) {
+export function layoutFor({
+  style = 'reel',
+  width = 1080,
+  height = 1920,
+  sourceWidth,
+  sourceHeight,
+  subtitles = true,
+  camH = 0,
+} = {}) {
+  if (camH > 0) return camLayout({ width, height, sourceWidth, sourceHeight, camH });
   const box = pictureBox({ width, height, sourceWidth, sourceHeight });
   const gap = Math.round(height * 0.025);
   const titleSize = Math.round(width * (style === 'blur' ? 0.07 : 0.062));
@@ -469,6 +481,66 @@ export function layoutFor({ style = 'reel', width = 1080, height = 1920, sourceW
     title: style === 'blur' ? { an: 5, y: Math.round(height * 0.17) } : { an: 2, y: box.pictureTop - gap },
     subs: { an: 8, y: subsTop },
     credit: { an: 8, y: subtitles ? subsTop + Math.round(subSize * 1.3) + gap : subsTop },
+  };
+}
+
+/**
+ * The webcam crop, reshaped for the top of the frame.
+ *
+ * Shown full width; its height follows the webcam's own shape within limits,
+ * so a wide overlay is not stretched into a tall one. When the crop has to
+ * lose height, more comes off the bottom than the top: the face is in the
+ * upper part of a webcam and the desk is in the lower.
+ */
+export function fitCam(rect, { width = 1080, minH = 420, maxH = 600 } = {}) {
+  if (!rect || !(rect.w > 0) || !(rect.h > 0)) return null;
+  const natural = Math.round((width * rect.h) / rect.w / 2) * 2;
+  const outH = Math.min(maxH, Math.max(minH, natural));
+  const wanted = width / outH;
+  let { x, y, w, h } = rect;
+  if (w / h > wanted) {
+    const narrower = h * wanted;
+    x += (w - narrower) / 2;
+    w = narrower;
+  } else {
+    const shorter = w / wanted;
+    y += (h - shorter) * 0.35;
+    h = shorter;
+  }
+  const even = (v) => Math.max(0, Math.floor(v / 2) * 2);
+  return { x: even(x), y: even(y), w: Math.max(2, even(w)), h: Math.max(2, even(h)), outH };
+}
+
+/**
+ * Camera on top: the streamer's webcam across the top, the game directly
+ * under it, the title above both and the credit below. Subtitles sit on the
+ * seam between the two, the classic place for them in this layout, and
+ * the pair fills about 60% of the screen against about a third for the game
+ * on its own — the reviewer's main complaint about the plain layout.
+ */
+export function camLayout({ width = 1080, height = 1920, sourceWidth, sourceHeight, camH }) {
+  const { pictureH } = pictureBox({ width, height, sourceWidth, sourceHeight });
+  const stackH = camH + pictureH;
+  const gap = Math.round(height * 0.025);
+  // Room for a two-line title above, clear of the platform's top bar.
+  const camTop = Math.max(340, Math.floor((height - stackH) / 4) * 2 - 40);
+  return {
+    cam: true,
+    width,
+    height,
+    camTop,
+    camH,
+    pictureTop: camTop + camH,
+    pictureH,
+    pictureBottom: camTop + stackH,
+    titleSize: Math.round(width * 0.062),
+    subSize: Math.round(width * 0.07),
+    creditSize: Math.round(width * 0.037),
+    subOutline: 6,
+    titleLines: 2,
+    title: { an: 2, y: camTop - gap },
+    subs: { an: 5, y: camTop + camH },
+    credit: { an: 8, y: camTop + stackH + gap },
   };
 }
 
@@ -519,7 +591,7 @@ export function buildAss({ layout, style = 'reel', titleLines = [], credit = '',
     '[V4+ Styles]',
     'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
     style_('Title', layout.titleSize, '&H00FFFFFF', titleOutline, 2),
-    style_('Sub', layout.subSize, '&H00FFFFFF', 5, 8),
+    style_('Sub', layout.subSize, '&H00FFFFFF', layout.subOutline ?? 5, 8),
     style_('Credit', layout.creditSize, creditColour, creditOutline, 8),
     '',
     '[Events]',
@@ -594,15 +666,31 @@ export function shortformArgs({
   sourceHeight = 1080,
   duration = 30,
   music = null,
+  cam = null,
+  trim = null,
 }) {
   const box = pictureBox({ width, height, sourceWidth, sourceHeight });
-  const base =
-    style === 'blur'
-      ? verticalFilter({ width, height })
-      : `scale=${width}:${box.pictureH},pad=${width}:${height}:0:${box.pictureTop}:color=black,setsar=1`;
   const text = `subtitles=filename=${escapeFilterPath(assPath)}:fontsdir=${escapeFilterPath(fontsDir)}`;
-  const chains = [`[0:v]${base},${text}[v]`];
-  const inputs = ['-i', input];
+  let chains;
+  if (cam) {
+    const layout = camLayout({ width, height, sourceWidth, sourceHeight, camH: cam.outH });
+    chains = [
+      '[0:v]split=2[c][g]',
+      `[c]crop=${cam.w}:${cam.h}:${cam.x}:${cam.y},scale=${width}:${cam.outH},setsar=1[cam]`,
+      `[g]scale=${width}:${box.pictureH},setsar=1[game]`,
+      `[cam][game]vstack=inputs=2,pad=${width}:${height}:0:${layout.camTop}:color=black,${text}[v]`,
+    ];
+  } else {
+    const base =
+      style === 'blur'
+        ? verticalFilter({ width, height })
+        : `scale=${width}:${box.pictureH},pad=${width}:${height}:0:${box.pictureTop}:color=black,setsar=1`;
+    chains = [`[0:v]${base},${text}[v]`];
+  }
+  // A redo renders a window of a wider cut: seek and limit the input itself.
+  const inputs = trim
+    ? ['-ss', String(trim.start), '-t', String(trim.duration), '-i', input]
+    : ['-i', input];
   const finish = `loudnorm=I=${loudness}:TP=-1.5:LRA=11,aresample=48000`;
 
   if (hasAudio && music) {
@@ -648,7 +736,7 @@ export function shortformArgs({
 }
 
 /** Audio, picture size and length, in one probe. */
-async function probe(input) {
+export async function probe(input) {
   try {
     const { stdout } = await run(
       'ffprobe',
@@ -702,6 +790,42 @@ export async function transcribe(input, { python = 'python', speechModel = 'base
   return data;
 }
 
+/**
+ * The webcam's rectangle in the cut, from src/facecam.py, or null when there
+ * is none (or no way to tell — then the plain layout is the safe choice).
+ */
+export async function detectFacecam(input, { python = 'python' } = {}) {
+  const { file, prefix } = splitCommand(python);
+  const { stdout } = await run(file, [...prefix, join(config.root, 'src', 'facecam.py'), input], {
+    cwd: config.root,
+    label: 'facecam',
+  });
+  const data = JSON.parse(stdout.trim().split(/\r?\n/).pop() || '{}');
+  return data.found ? { x: data.x, y: data.y, w: data.w, h: data.h } : null;
+}
+
+/**
+ * What was said in a cut, already judged: words if the transcript is the
+ * streamer's, null with a reason if it is missing or a guess.
+ */
+export async function speechIn(input, settings = shortformConfig()) {
+  if (!settings.subtitles) return { words: null, speechError: null };
+  let words;
+  try {
+    words = (await transcribe(input, settings)).words || [];
+  } catch (err) {
+    return { words: null, speechError: String(err.message).split(/\r?\n/)[0] };
+  }
+  const check = transcriptUsable(words);
+  if (words.length && !check.usable) {
+    return {
+      words: null,
+      speechError: `speech too unclear to subtitle (confidence ${check.confidence.toFixed(2)}, probably not English)`,
+    };
+  }
+  return { words, speechError: null };
+}
+
 async function chooseTrack(settings, seed, clipSeconds) {
   const tracks = await listTracks(settings.musicDir);
   if (!tracks.length) return null;
@@ -740,27 +864,36 @@ export async function renderShort({
   settings = shortformConfig(),
   avoid = [],
   music = false,
+  // Already transcribed and judged (by the reviewer): skip doing it again.
+  // `undefined` means "not done yet", null means "nothing usable".
+  words: given = undefined,
+  speechError: givenError = null,
+  // A window of a wider cut, for a redo: {start, duration} in seconds.
+  trim = null,
 }) {
   const stem = basename(output, extname(output));
   await mkdir(dirname(output), { recursive: true });
   await mkdir(workDir, { recursive: true });
 
   const source = await probe(input);
+  const length = trim ? Math.min(trim.duration, source.duration - trim.start) : source.duration;
 
   // What was said: for the subtitles, and for a title about what happened.
-  let words = null;
-  let speechError = null;
-  if (settings.subtitles && source.hasAudio) {
+  let words = given ?? null;
+  let speechError = givenError;
+  if (given === undefined && source.hasAudio) {
     onProgress({ stage: 'short', percent: 0, message: 'transcribing' });
+    ({ words, speechError } = await speechIn(input, settings));
+  }
+
+  // The streamer's camera on top, when there is one to find.
+  let cam = null;
+  if (settings.facecam) {
+    onProgress({ stage: 'short', percent: 0, message: 'looking for the webcam' });
     try {
-      words = (await transcribe(input, settings)).words || [];
-    } catch (err) {
-      speechError = String(err.message).split(/\r?\n/)[0];
-    }
-    const check = transcriptUsable(words);
-    if (words?.length && !check.usable) {
-      speechError = `speech too unclear to subtitle (confidence ${check.confidence.toFixed(2)}, probably not English)`;
-      words = null;
+      cam = fitCam(await detectFacecam(input, settings));
+    } catch {
+      cam = null; // no camera found is a layout choice, never a failed short
     }
   }
 
@@ -771,6 +904,7 @@ export async function renderShort({
     sourceWidth: source.width,
     sourceHeight: source.height,
     subtitles: chunks.length > 0,
+    camH: cam?.outH || 0,
   });
 
   // Written beside the source, never in the ready folder, so nothing half-made
@@ -782,7 +916,10 @@ export async function renderShort({
     buildAss({
       layout,
       style: settings.style,
-      titleLines: wrapCaption(caption, { maxChars: settings.style === 'blur' ? 16 : 20 }),
+      titleLines: wrapCaption(caption, {
+        maxChars: settings.style === 'blur' ? 16 : 20,
+        maxLines: layout.titleLines ?? 3,
+      }),
       credit: creditFor(moment),
       chunks,
       fontName: settings.fontName,
@@ -790,11 +927,10 @@ export async function renderShort({
     'utf8',
   );
 
-  const track = music && source.hasAudio ? await chooseTrack(settings, hashOf(moment?.id || stem), source.duration) : null;
+  const track = music && source.hasAudio ? await chooseTrack(settings, hashOf(moment?.id || stem), length) : null;
 
-  try {
-    onProgress({ stage: 'short', percent: 0, message: 'rendering short' });
-    await run(
+  const render = () =>
+    run(
       'ffmpeg',
       shortformArgs({
         input,
@@ -806,8 +942,10 @@ export async function renderShort({
         style: settings.style,
         sourceWidth: source.width,
         sourceHeight: source.height,
-        duration: source.duration,
+        duration: length,
         music: track,
+        cam,
+        trim,
       }),
       {
         cwd: config.root,
@@ -821,6 +959,21 @@ export async function renderShort({
         },
       },
     );
+
+  try {
+    onProgress({ stage: 'short', percent: 0, message: 'rendering short' });
+    // Checked before it can reach the ready folder. A fault in the file is
+    // rendered once more; a fault in the footage is not worth repeating.
+    let checks = null;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      await render();
+      checks = await validateShort(partial, { expectSeconds: length, hasAudio: source.hasAudio });
+      if (checks.ok) break;
+      if (!checks.retry || attempt === 2) {
+        throw new Error(`the finished short failed its checks: ${checks.problems.map((p) => p.text).join('; ')}`);
+      }
+      onProgress({ stage: 'short', percent: 0, message: 'failed its checks, rendering again' });
+    }
 
     // The post copy, as plain text to read and as parts for the panel's
     // platform buttons, written before the video moves so the panel never
@@ -840,6 +993,9 @@ export async function renderShort({
       words: words ? words.length : null,
       speechError,
       track: track ? basename(track.path) : null,
+      cam: Boolean(cam),
+      checked: checks.ok,
+      duration: checks.duration,
     };
   } finally {
     await rm(assPath, { force: true });

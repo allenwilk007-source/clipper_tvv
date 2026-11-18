@@ -8,6 +8,7 @@ import { clipQueueStatus, enqueueClip, getClipJob, publicJob } from './clipjobs.
 import { config, credentialsMissing, nothingToRun, root } from './config.js';
 import { Automation, SHORT_FILE, parseRange } from './automation.js';
 import { Feed } from './feed.js';
+import { acquireLock, lockMessage } from './lock.js';
 
 // Enough for the biggest plausible clip request and nothing like enough to be
 // worth sending as a denial-of-service payload.
@@ -23,6 +24,15 @@ const TYPES = {
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
 };
+
+// One copy at a time: see lock.js for what happened when there were three.
+const LOCK_PATH = join(root, 'data', 'app.lock');
+const lock = acquireLock(LOCK_PATH, { name: 'npm start' });
+if (!lock.ok) {
+  console.error(`\n  ${lockMessage(lock.holder, LOCK_PATH)}\n`);
+  process.exit(1);
+}
+process.on('exit', () => lock.release());
 
 const feed = new Feed();
 const automation = new Automation({ feed, log: (message) => feed.log(message) });

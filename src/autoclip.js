@@ -278,13 +278,15 @@ export class AutoClipper {
         path: job.shortPath,
         error: ok ? null : job.message,
         caption: ok ? job.caption : null,
+        review: job.review || null,
       });
     } catch (err) {
       this.log(`autocollect: could not record the result for ${moment.id}: ${err.message}`);
     }
     this.log(
       ok
-        ? `autocollect: ready -> ${relative(root, job.shortPath)} — "${job.caption}"`
+        ? `autocollect: ready -> ${relative(root, job.shortPath)} — "${job.caption}"` +
+            (job.review ? ` · score ${job.review.score}${job.review.redone ? ` (re-cut from ${job.review.before})` : ''}${job.review.weak ? ' · WEAK' : ''}` : '')
         : `autocollect: ${moment.broadcaster} failed — ${job.message}`,
     );
   }

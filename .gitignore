@@ -34,3 +34,6 @@ desktop.ini
 # Background music: your own tracks, never committed
 music/*
 !music/README.md
+
+# Downloaded models (see the README for where each comes from)
+models/*.onnx

@@ -324,3 +324,52 @@ test('a transcript the model was guessing at is not burned into the clip', async
   assert.equal(transcriptUsable([{ word: ' x', start: 0, end: 1 }]).usable, true);
   assert.equal(transcriptUsable([]).usable, false);
 });
+
+// --- camera on top ------------------------------------------------------------
+
+test('the webcam crop is reshaped for the top of the frame, keeping the face', async () => {
+  const { fitCam } = await import('./shortform.js');
+  // kaicenat's overlay, measured at 1080p: wide and short.
+  const wide = fitCam({ x: 0, y: 432, w: 390, h: 258 });
+  assert.equal(wide.outH, 714 > 600 ? 600 : 714);
+  assert.ok(wide.w / wide.h - 1080 / wide.outH < 0.02, 'reshaped to the slot');
+  // A tall crop loses more from the bottom (the desk) than the top (the face).
+  const tall = fitCam({ x: 100, y: 100, w: 200, h: 400 });
+  const cutTop = tall.y - 100;
+  const cutBottom = 100 + 400 - (tall.y + tall.h);
+  assert.ok(cutBottom > cutTop, `top lost ${cutTop}, bottom ${cutBottom}`);
+  assert.equal(fitCam(null), null);
+});
+
+test('camera on top: webcam, then game, title above, subtitles on the seam', async () => {
+  const { camLayout, layoutFor } = await import('./shortform.js');
+  const layout = camLayout({ sourceWidth: 1920, sourceHeight: 1080, camH: 560 });
+  assert.equal(layout.pictureTop, layout.camTop + 560);
+  assert.equal(layout.pictureBottom, layout.camTop + 560 + 608);
+  assert.deepEqual(layout.subs, { an: 5, y: layout.camTop + 560 });
+  assert.ok(layout.title.y < layout.camTop);
+  // Clear of the platform's top bar, and the credit still on the canvas.
+  assert.ok(layout.camTop >= 340);
+  assert.ok(layout.credit.y < 1920 - 40);
+  // Only two title lines fit above the camera.
+  assert.equal(layout.titleLines, 2);
+  // layoutFor hands over to it whenever there is a camera.
+  assert.equal(layoutFor({ camH: 560 }).cam, true);
+  assert.equal(layoutFor({}).cam, undefined);
+});
+
+test('the camera graph crops the webcam, stacks it on the game, and pads', async () => {
+  const { shortformArgs } = await import('./shortform.js');
+  const args = shortformArgs({ ...ARGS, cam: { x: 0, y: 432, w: 390, h: 216, outH: 600 } });
+  const graph = graphOf(args);
+  assert.match(graph, /\[0:v\]split=2\[c\]\[g\]/);
+  assert.match(graph, /\[c\]crop=390:216:0:432,scale=1080:600,setsar=1\[cam\]/);
+  assert.match(graph, /\[g\]scale=1080:608,setsar=1\[game\]/);
+  assert.match(graph, /\[cam\]\[game\]vstack=inputs=2,pad=1080:1920:0:\d+:color=black,subtitles=filename=/);
+});
+
+test('a redo renders a window of the wider cut by seeking the input', async () => {
+  const { shortformArgs } = await import('./shortform.js');
+  const args = shortformArgs({ ...ARGS, trim: { start: 22.5, duration: 30 } });
+  assert.deepEqual(args.slice(args.indexOf('-ss'), args.indexOf('in.mp4') + 1), ['-ss', '22.5', '-t', '30', '-i', 'in.mp4']);
+});

@@ -162,11 +162,24 @@ export async function listShorts(store, dir, { limit = 24 } = {}) {
           /* older shorts have only the .txt */
         }
       }
+      let review = null;
+      try {
+        review = row.review ? JSON.parse(row.review) : null;
+      } catch {
+        review = null;
+      }
       return {
         momentId: row.momentId,
         broadcaster: row.broadcaster,
         caption: row.caption,
         status: row.status,
+        // The engagement meter's verdict, for shorts made since it existed.
+        score: Number.isFinite(row.score) ? row.score : null,
+        funny: Number.isFinite(row.funny) ? row.funny : null,
+        redone: row.redone === 1,
+        weak: row.weak === 1,
+        reasons: review?.reasons || [],
+        before: review?.before ?? null,
         error: row.error,
         createdAt: row.createdAt,
         finishedAt: row.finishedAt,

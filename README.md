@@ -335,6 +335,95 @@ developer app of your own on each, which only you can register:
 None of that is built yet: it can only be built and tested against your own
 accounts.
 
+### Camera on top
+
+When a clip has the streamer's webcam in it, the short puts it across the top
+with the game directly underneath, the title above both and the subtitles on
+the seam. Together they fill about 60% of the screen, against about a third
+for the game on its own.
+
+Finding the webcam takes a face detector: OpenCV's YuNet, a 230 KB model,
+fetched once into `models/` (not committed):
+
+```bash
+curl -L -o models/face_detection_yunet_2023mar.onnx https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx
+```
+
+A webcam is a face that stays in one place for the whole clip, toward the
+side or the top or bottom of the picture; game characters move with the
+camera and come and go. Measured on ten live streams: seven webcams found,
+and the three channels without one correctly reported none, including a GTA
+character standing dead-centre in a still conversation, which the
+"toward the edge" rule exists to reject. The crop is the still region around
+the face, since the game moves over thirty seconds and the webcam's room
+does not. On a still scene, where that says nothing, it falls back to a
+tight head-and-shoulders crop that cannot spill into the game. It can still
+take in a strip of game beside a small webcam when the game is also still.
+`SHORTS_FACECAM=off` keeps the plain layout.
+
+### The engagement meter, and redoing weak clips
+
+Every automated short is scored 0-100 before it is rendered, on four things
+measured in the cut: how hard chat reacted, a loudness burst near the payoff
+(laughing, shouting, explosions), clear energetic speech, and motion on
+screen, with a penalty for a clip that is mostly a still frame. Each card in
+the panel shows the score, a funny rating and the reasons.
+
+It was checked against an independent reviewer that rewatched 12 live shorts
+and rated them by hand, without seeing the meter: **rank correlation 0.83**.
+The two it rated 1/10, a phone banking menu and a frozen webcam, metered 13
+and 17. The loudness burst was the best single signal (0.62); chat alone was
+weak (0.31), because chat also reacts to story cutscenes where nothing
+happens on screen.
+
+Below **50**, the short is redone once: a 70-second cut around the moment,
+and the 30-second window in it that scores best, with the burst landing
+about three quarters of the way in. The redo is kept only if it scores
+higher. Below **30** after that, the card is flagged **weak: not worth
+posting**. Both lines are `ENGAGEMENT_KEEP` and `ENGAGEMENT_FLOOR`.
+
+What it cannot do is see a joke land. Its misses in the calibration were
+cutscenes, where NPC dialogue reads as speech. Titles stay the weakest
+part: without an AI model watching the clip, a title is a quote or a
+reaction, not a description of what happened.
+
+### Checks before a short is ready
+
+A short only moves into `clips/ready/` after it passes:
+
+- **the file**: decodes cleanly end to end, is 1080x1920 H.264 with 48 kHz
+  audio, and is the length its cut was. A failure here is usually transient
+  (a process killed mid-write), so it is rendered once more.
+- **what is in it**: not mostly black, not a stream frozen for over 80% of
+  the clip, not silent. Rendering the same footage again would not help, so
+  these are rejected.
+- **the cut**: one that comes back shorter than asked (measured: 28.0s from a
+  30s window) missed part of the moment because the recording had not caught
+  up. It is thrown away and cut again once it has.
+
+Failures that pass are retried with a pause: Windows refusing to start a
+process (exit 3221225794), a dropped connection, a stray yt-dlp error.
+Run over the first 38 shorts, the checks found exactly two bad ones: the
+28-second one, and a webcam frozen for all 30 seconds.
+
+### One copy at a time
+
+`npm start` and `npm run auto` each take `data/app.lock`, and a second copy
+refuses to start, naming the one running. Three copies once ran at once
+against the same database, which is what started too many processes for
+Windows and cut one lirik moment twice. The store refuses a second claim on
+the same moment too: anything within 45 seconds on the same recording,
+under any id, from any copy.
+
+### Channels with no recording
+
+A channel can be live with nothing to cut: Twitch publishes some streams as a
+recording only afterwards, or not at all. ishowspeed, live during testing,
+had a newest archive from days earlier, so it showed **not recording** and
+none of his moments could be cut. Cutting "today's offset" into that old VOD
+would have been a random clip from another day. Clipping such channels would
+need recording the live stream itself, which is not built.
+
 ## Detection: being first, and proving it
 
 Two problems shaped everything in `src/chat.js`, `src/store.js` and
@@ -563,6 +652,10 @@ src/autoclip.js which moments to cut, and cutting them
 src/automation.js channel automation: the panel's channels, switch, shorts
 src/archive.js  where a live channel is recording, and its game, without credentials
 src/transcribe.py speech to timed words (faster-whisper), for subtitles and titles
+src/facecam.py  where the streamer's webcam is in a clip (OpenCV YuNet)
+src/engagement.js the engagement meter, and choosing the window for a redo
+src/validate.js checks every short passes before it is ready
+src/lock.js     one copy of the app at a time
 src/auto.js     npm run auto: channel automation, headless
 src/server.js   HTTP + static
 src/demo.js     fixture, pushed through the real pipeline

@@ -610,7 +610,24 @@ function statusLine(view) {
   return `On · ${parts.join(' · ')}${note}`;
 }
 
-const shortKey = (item) => [item.momentId, item.status, item.file].join('|');
+const shortKey = (item) => [item.momentId, item.status, item.file, item.score].join('|');
+
+// The engagement meter, as a bar and a line. Shorts made before the meter
+// existed have no score and show none.
+function paintMeter(node, item) {
+  const meter = node.querySelector('.short-meter');
+  if (!Number.isFinite(item.score)) return;
+  meter.hidden = false;
+  meter.querySelector('.meter-fill').style.width = `${Math.max(3, Math.min(100, item.score))}%`;
+  const bits = [`Engagement ${item.score}`];
+  if (Number.isFinite(item.funny)) bits.push(`funny ${item.funny}`);
+  if (item.redone) bits.push(`re-cut from ${item.before ?? 'a weaker cut'}`);
+  if (item.weak) bits.push('weak: not worth posting');
+  meter.querySelector('.meter-text').textContent = bits.join(' · ');
+  meter.title = item.reasons?.length ? item.reasons.join('; ') : '';
+  node.classList.toggle('is-weak', Boolean(item.weak));
+  node.classList.toggle('is-strong', item.score >= 65);
+}
 
 function buildShort(item) {
   const node = auto.template.content.firstElementChild.cloneNode(true);
@@ -619,6 +636,7 @@ function buildShort(item) {
   const download = node.querySelector('.short-download');
 
   node.querySelector('.short-caption').textContent = item.caption || '(no caption)';
+  paintMeter(node, item);
   const when = new Date(item.finishedAt || item.createdAt);
   node.querySelector('.short-meta').textContent =
     `@${item.broadcaster} · ${when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;

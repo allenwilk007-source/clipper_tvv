@@ -32,7 +32,7 @@ export const HORIZONS = [
 // fresh database free, but an existing one needs to know what it is already
 // holding — Phase 2 adds columns, and by then there will be launch-week data
 // in here that must not be thrown away to get them.
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 const SCHEMA = `
 create table if not exists moments (
@@ -168,7 +168,8 @@ export class Store {
       // said, which is not known until the cut has been transcribed.
       finishAutoclip: this.db.prepare(`
         update autoclips set status = ?, path = ?, error = ?, finished_at = ?,
-               caption = coalesce(?, caption)
+               caption = coalesce(?, caption),
+               score = ?, funny = ?, redone = ?, weak = ?, review = ?
          where moment_id = ?
       `),
       recentAutoclips: this.db.prepare(`
@@ -176,8 +177,18 @@ export class Store {
                broadcaster, status, created_at as createdAt
           from autoclips where created_at >= ? order by created_at asc
       `),
+      // Same VOD, near the same second: the same moment, whichever copy of
+      // the app found it and under whatever id.
+      nearbyAutoclip: this.db.prepare(`
+        select 1 from autoclips
+         where replace(vod_id, 'v', '') = replace(?, 'v', '')
+           and abs(offset_seconds - ?) <= ?
+           and created_at >= ?
+         limit 1
+      `),
       listAutoclips: this.db.prepare(`
         select moment_id as momentId, vod_id as vodId, offset_seconds as offsetSeconds,
+               score, funny, redone, weak, review,
                broadcaster, caption, status, path, error,
                created_at as createdAt, finished_at as finishedAt
           from autoclips order by created_at desc limit ?
@@ -207,7 +218,20 @@ export class Store {
 
     // v2 only added a table, which `create table if not exists` above already
     // handles for old and new databases alike. Column changes go here:
-    // if (current < 3) this.db.exec('alter table moments add column ...');
+    // v3: what the engagement meter said about each automated short.
+    if (current < 3) {
+      const have = new Set(this.db.prepare('pragma table_info(autoclips)').all().map((c) => c.name));
+      for (const [name, type] of [
+        ['score', 'integer'],
+        ['funny', 'integer'],
+        ['redone', 'integer'],
+        ['weak', 'integer'],
+        ['review', 'text'],
+      ]) {
+        if (!have.has(name)) this.db.exec(`alter table autoclips add column ${name} ${type}`);
+      }
+    }
+    // if (current < 4) this.db.exec('alter table moments add column ...');
 
     if (current !== SCHEMA_VERSION) this.db.exec(`pragma user_version = ${SCHEMA_VERSION}`);
     return SCHEMA_VERSION;
@@ -333,20 +357,50 @@ export class Store {
   }
 
   /** Claim a moment for autocollect. Returns false if it was already claimed. */
-  recordAutoclip({ momentId, vodId, offsetSeconds, broadcaster, caption, at = new Date() }) {
-    const result = this.q.insertAutoclip.run(
-      momentId,
-      nul(vodId),
-      int(offsetSeconds),
-      nul(broadcaster),
-      nul(caption),
-      at.toISOString(),
-    );
-    return (result.changes ?? 0) > 0;
+  recordAutoclip({ momentId, vodId, offsetSeconds, broadcaster, caption, at = new Date(), dedupeSeconds = 45 }) {
+    // Checked and claimed in one locked transaction, so two copies of the app
+    // cannot both decide a moment is free. Measured before this: two lirik
+    // shorts six seconds apart, cut by two copies under two different ids.
+    this.db.exec('begin immediate');
+    try {
+      const since = new Date(at.getTime() - 24 * 3600_000).toISOString();
+      if (vodId && Number.isFinite(Number(offsetSeconds))) {
+        const taken = this.q.nearbyAutoclip.get(String(vodId), int(offsetSeconds), dedupeSeconds, since);
+        if (taken) {
+          this.db.exec('rollback');
+          return false;
+        }
+      }
+      const result = this.q.insertAutoclip.run(
+        momentId,
+        nul(vodId),
+        int(offsetSeconds),
+        nul(broadcaster),
+        nul(caption),
+        at.toISOString(),
+      );
+      this.db.exec('commit');
+      return (result.changes ?? 0) > 0;
+    } catch (err) {
+      this.db.exec('rollback');
+      throw err;
+    }
   }
 
-  finishAutoclip(momentId, { status, path = null, error = null, caption = null, at = new Date() }) {
-    this.q.finishAutoclip.run(status, nul(path), nul(error), at.toISOString(), nul(caption), momentId);
+  finishAutoclip(momentId, { status, path = null, error = null, caption = null, review = null, at = new Date() }) {
+    this.q.finishAutoclip.run(
+      status,
+      nul(path),
+      nul(error),
+      at.toISOString(),
+      nul(caption),
+      int(review?.score),
+      int(review?.funny),
+      review ? (review.redone ? 1 : 0) : null,
+      review ? (review.weak ? 1 : 0) : null,
+      review ? JSON.stringify({ reasons: review.reasons || [], parts: review.parts || null, before: review.before ?? null }) : null,
+      momentId,
+    );
   }
 
   /** Newest first: what the automation panel lists. */

@@ -833,3 +833,47 @@ select {
   font-size: 12px;
   line-height: 1.35;
 }
+
+/* ---------- engagement meter ---------- */
+
+.short-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 2px;
+}
+
+.meter-bar {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--warm);
+}
+
+.short.is-strong .meter-fill {
+  background: var(--fresh);
+}
+
+.short.is-weak .meter-fill {
+  background: var(--danger);
+}
+
+.meter-text {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.short.is-weak {
+  opacity: 0.6;
+}
+
+.short.is-weak .meter-text {
+  color: var(--danger);
+}

@@ -273,3 +273,33 @@ test('the defaults now allow far more shorts an hour', () => {
   assert.equal(defaults.maxPerPoll, 4);
   assert.deepEqual(defaults.games, ['Grand Theft Auto VI', 'Fortnite']);
 });
+
+// --- across copies of the app --------------------------------------------------
+
+test('the same moment is claimed once, even by a different copy under a different id', () => {
+  const store = new Store(':memory:');
+  // Measured before this: lirik cut twice, six seconds apart, by two copies.
+  assert.equal(store.recordAutoclip({ momentId: 'chat:lirik:1', vodId: '2932444934', offsetSeconds: 12077, broadcaster: 'lirik' }), true);
+  assert.equal(store.recordAutoclip({ momentId: 'chat:lirik:2', vodId: 'v2932444934', offsetSeconds: 12083, broadcaster: 'lirik' }), false);
+  // Well apart on the same recording is a different moment.
+  assert.equal(store.recordAutoclip({ momentId: 'chat:lirik:3', vodId: '2932444934', offsetSeconds: 12200, broadcaster: 'lirik' }), true);
+  store.close();
+});
+
+test("the meter's verdict is kept with each short", () => {
+  const store = new Store(':memory:');
+  store.recordAutoclip({ momentId: 'm1', vodId: '1', offsetSeconds: 10, broadcaster: 'x' });
+  store.finishAutoclip('m1', {
+    status: 'done',
+    path: 'ready/x.mp4',
+    caption: '"Are you crazy?" 😳',
+    review: { score: 62, funny: 40, redone: true, before: 38, weak: false, reasons: ['a 12 dB burst at the payoff'] },
+  });
+  const [row] = store.listAutoclips();
+  assert.equal(row.score, 62);
+  assert.equal(row.funny, 40);
+  assert.equal(row.redone, 1);
+  assert.equal(row.weak, 0);
+  assert.deepEqual(JSON.parse(row.review).reasons, ['a 12 dB burst at the payoff']);
+  store.close();
+});
