@@ -178,6 +178,81 @@ Flag, never block. The operator decides.
 
 ---
 
+## Settled: a signal can rank without detecting
+
+Keep these two questions apart. They sound alike, they have different answers,
+and conflating them cost a working signal most of an evening.
+
+> **Detection** — does this signal tell a moment from ordinary stream?
+> **Ranking** — among moments something else already nominated, does it sort
+> the good from the bad?
+
+Stream audio is the worked example. Asked as detection, it fails: over 29
+chat-nominated moments compared against a random offset in the *same* VOD, the
+nominated one was the louder of the pair 14 times — 48%, against 50% by chance
+(`src/audiocontrol.js`). Audio cannot find a moment.
+
+Asked as ranking, it is the strongest single signal in hand ratings: Spearman
+0.62 against rated clip quality, where chat alone manages 0.31. The mechanism
+is specific and worth remembering — chat fires at story cutscenes where
+nothing happens on screen, and in a story-heavy game that is not a rare edge
+case. Audio does not, which is exactly why it adds information chat has not
+already given.
+
+Both results are true. A signal can be useless for finding moments and the
+best thing available for ordering them, because ranking is conditional on a
+nomination that has already happened. **A negative detection result is not a
+verdict on ranking, and a control group built without a notion of quality
+cannot speak to quality at all.** The audio control had no idea what a good
+clip was; it was never going to.
+
+The practical rule: before concluding a signal is worthless, check which of
+the two questions the experiment actually asked.
+
+## Height is not position
+
+A second distinction, same family, learned the same way. How *loud* a peak is
+and how well it locates the moment are separate claims, and the first does not
+imply the second.
+
+The plan was to trust an audio-derived cut point when the burst was large.
+Measured over 45 moments, the rate at which the audio peak precedes the chat
+offset is flat across every threshold: 67% at a 4 dB floor, 68% at 9 dB, 69%
+at 12 dB. A loud burst is no better placed than a quiet one, so a confidence
+gate built on height is a number standing in for an argument.
+
+Isolation — how far the peak beats the best rival more than 5s away — was the
+replacement, on the theory that a window loud in five places cannot locate
+anything. It is the right *kind* of property, and it also fails: 42% at 2 dB,
+71% at 4 dB, 67% at 6 dB, 0% at 8 dB, on 19, 7, 3 and 1 moments. That is not
+a gradient, it is a sample running out.
+
+## The lead itself did not replicate
+
+Worth recording as the most expensive thing learned here, because it was
+reported as a finding before it was one.
+
+The 67% figure above came from 45 moments and 2.2 sigma. Re-run over 60, the
+audio peak preceded the chat offset in **30 of 60 — exactly 50%, 0.0 sigma,
+median lag 1.2s**. Pooled across both runs it is 60/105, 57%, 1.46 sigma.
+Not significant. **Stream audio does not lead chat in any way this can
+measure**, and the ~7s median lag quoted from the first run is not a real
+quantity to design around.
+
+Two habits this should buy:
+
+1. **A 2-sigma result at n=45 is a hypothesis, not a finding.** It was
+   reported downstream as a measured lag and a cut window was derived from it.
+   Nothing broke, because the gate it would have fed never opened — but the
+   number was load-bearing in someone else's design before it was checked.
+2. **Do not go looking for the subgroup where it still works.** The two
+   samples genuinely differ (the first was 13 large English channels, the
+   second 66 including many small and non-English ones), so there is an
+   inviting story about chat size. Chasing it after seeing the null is how a
+   dead effect gets resurrected: enough splits and one of them clears 2 sigma
+   by construction. If chat size matters, it gets its own hypothesis and its
+   own fresh sample, declared before looking.
+
 ## How to tell if any of this worked
 
 One number, re-run every phase against the same held-out history:

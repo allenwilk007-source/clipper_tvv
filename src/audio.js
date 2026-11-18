@@ -33,6 +33,12 @@ const SILENCE_FLOOR = -70;
 // constant, same reason.
 const MAD_SCALE = 1.4826;
 
+// How far apart two peaks must be to count as separate events. ebur128's
+// momentary loudness is a 400ms sliding window, so neighbouring samples are
+// largely the same sound and anything shorter would compare a peak with
+// itself.
+const PEAK_SEPARATION_SECONDS = 5;
+
 /** The window to fetch, clamped so a moment near the start of a VOD still works. */
 export function audioWindow(offsetSeconds, { before = 30, after = 30 } = {}) {
   const offset = Math.max(0, Math.round(Number(offsetSeconds) || 0));
@@ -101,7 +107,22 @@ export function peakOf(samples, { windowStart = 0, chatOffset = null } = {}) {
   // produced there means and the two can be compared without conversion.
   const burst = Math.round((peak.m - stats.median) * 10) / 10;
 
+  // How much the loudest point beats the best RIVAL event, in dB.
+  //
+  // Height and position are different claims. A window can be very loud and
+  // still give no idea where the moment was, if it is loud in five places —
+  // taking the maximum of near-equals picks one of them essentially at
+  // random. Isolation asks the question that actually bears on placement:
+  // was there one event here, or several?
+  let rival = null;
+  for (const sample of samples) {
+    if (Math.abs(sample.t - peak.t) < PEAK_SEPARATION_SECONDS) continue;
+    if (rival === null || sample.m > rival) rival = sample.m;
+  }
+  const isolation = rival === null ? null : Math.round((peak.m - rival) * 10) / 10;
+
   return {
+    isolation,
     at: Math.round(at * 10) / 10,
     loudness: Math.round(peak.m * 10) / 10,
     burst,

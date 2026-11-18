@@ -89,6 +89,34 @@ const median = (values) => {
   return sorted[Math.floor(sorted.length / 2)];
 };
 
+/**
+ * Does any gate make the position more trustworthy?
+ *
+ * The lead rate is the only proxy available for "the peak is where the moment
+ * was". If raising a threshold does not raise it, that threshold is not a
+ * confidence signal however sensible it sounds, and wiring it in would be a
+ * number doing the work of an argument.
+ */
+function gateTable(rows) {
+  const report = (label, key, floors) => {
+    console.log('');
+    console.log(`  ${label}`);
+    for (const floor of floors) {
+      const pass = rows.filter((r) => Number.isFinite(r[key]) && r[key] >= floor);
+      if (!pass.length) continue;
+      const lead = pass.filter((r) => r.lag > 0).length;
+      console.log(
+        `    >= ${String(floor).padStart(4)} dB   ${String(pass.length).padStart(2)}/${rows.length} clear` +
+          `   audio led chat ${String(lead).padStart(2)}/${String(pass.length).padStart(2)}` +
+          `  (${String(Math.round((lead / pass.length) * 100)).padStart(3)}%)`,
+      );
+    }
+  };
+
+  report('gate on BURST (height above the window median):', 'burst', [0, 6, 9, 12, 15, 18]);
+  report('gate on ISOLATION (lead over the best rival event):', 'isolation', [0, 2, 4, 6, 8, 10]);
+}
+
 async function main() {
   const dbPath = resolve(arg('db', config.storePath));
   const limit = Number(arg('limit', 40));
@@ -103,6 +131,7 @@ async function main() {
 
   const lags = [];
   const zs = [];
+  const rows = [];
   let failed = 0;
 
   for (const [index, moment] of moments.entries()) {
@@ -123,13 +152,14 @@ async function main() {
       continue;
     }
 
-    const { lag, z, loudness, median: med } = result.peak;
+    const { lag, z, burst, isolation } = result.peak;
     lags.push(lag);
     if (Number.isFinite(z)) zs.push(z);
+    rows.push({ lag, burst, isolation });
     console.log(
       `  ${String(index + 1).padStart(3)}. ${moment.broadcaster.padEnd(18)}` +
-        `lag ${String(lag).padStart(6)}s   peak ${String(loudness).padStart(6)} LUFS   ` +
-        `median ${String(med).padStart(6)}   z ${z === null ? '   -' : String(z).padStart(5)}`,
+        `lag ${String(lag).padStart(6)}s   burst ${String(burst).padStart(5)} dB   ` +
+        `isolation ${isolation === null ? '  -' : String(isolation).padStart(5)} dB`,
     );
   }
 
@@ -147,6 +177,8 @@ async function main() {
   const sigmas = (share - 0.5) / sigma;
 
   histogram(lags, half);
+
+  gateTable(rows);
 
   console.log('');
   console.log(`  probed ${lags.length}${failed ? `, ${failed} failed` : ''}`);
