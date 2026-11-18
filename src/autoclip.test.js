@@ -303,3 +303,30 @@ test("the meter's verdict is kept with each short", () => {
   assert.deepEqual(JSON.parse(row.review).reasons, ['a 12 dB burst at the payoff']);
   store.close();
 });
+
+// --- the cut window, by where the offset came from ----------------------------
+
+test('a chat-timed offset keeps the usual window', async () => {
+  const { windowFor } = await import('./autoclip.js');
+  assert.deepEqual(windowFor(moment(), { pre: 25, post: 5 }), { pre: 25, post: 5, source: 'chat' });
+  // An audio reading that detection did NOT trust leaves the offset as chat's.
+  const unsure = moment({ audioOffsetSeconds: 1020, audioZ: 1.2, reactionOffsetSeconds: 1030 });
+  assert.equal(windowFor(unsure, { pre: 25, post: 5 }).source, 'chat');
+});
+
+test('a confident audio offset is the moment itself, so more is kept after it', async () => {
+  const { AUDIO_WINDOW, windowFor } = await import('./autoclip.js');
+  const heard = moment({ audioOffsetSeconds: 1023, audioZ: 5, reactionOffsetSeconds: 1023 });
+  assert.deepEqual(windowFor(heard, { pre: 25, post: 5 }), { ...AUDIO_WINDOW, source: 'audio' });
+  // The payoff lands about three quarters in, with the reaction kept.
+  assert.ok(Math.abs(AUDIO_WINDOW.pre / (AUDIO_WINDOW.pre + AUDIO_WINDOW.post) - 0.73) < 0.02);
+});
+
+test('automation cuts an audio-timed moment with the audio window', async () => {
+  const { calls, enqueue } = recorder();
+  const auto = new AutoClipper({ enqueue, now: () => NOW, cfg });
+  await auto.onPoll([moment({ audioOffsetSeconds: 1023, audioZ: 5, reactionOffsetSeconds: 1023 })]);
+  assert.equal(calls[0].offsetSeconds, 1023);
+  assert.equal(calls[0].pre, 22);
+  assert.equal(calls[0].post, 8);
+});
