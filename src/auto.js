@@ -15,6 +15,7 @@ import { Automation } from './automation.js';
 import { clipQueueStatus } from './clipjobs.js';
 import { Feed } from './feed.js';
 import { acquireLock, lockMessage } from './lock.js';
+import { Uploader } from './uploader.js';
 
 const SUMMARY_MS = 10 * 60_000;
 
@@ -31,6 +32,8 @@ const feed = new Feed();
 const automation = new Automation({ feed, log: feed.log });
 // Headless means nobody is there to flip the switch.
 automation.settings.enabled = true;
+// Uploads keep the mode set in the page (data/uploads.json): off unless chosen.
+const uploader = new Uploader({ store: feed.store, dir: automation.dir, log: feed.log });
 
 function summary() {
   const { done, failed, queued, lastHour, skipped } = automation.clipper.status();
@@ -67,11 +70,15 @@ async function main() {
   }
 
   automation.start();
+  await uploader.load();
+  uploader.start();
+  feed.log(`upload: YouTube is ${uploader.settings.youtube.mode}`);
   setInterval(summary, SUMMARY_MS);
 }
 
 const shutdown = () => {
   summary();
+  uploader.stop();
   automation.stop();
   feed.stop();
   process.exit(0);

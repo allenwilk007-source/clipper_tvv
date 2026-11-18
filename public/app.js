@@ -780,8 +780,71 @@ auto.form.addEventListener('submit', async (event) => {
   if (await changeAutomation({ add: value })) auto.input.value = '';
 });
 
+// --- auto upload ---------------------------------------------------------------
+
+const up = {
+  box: document.getElementById('uploads'),
+  connect: document.getElementById('yt-connect'),
+  mode: document.getElementById('yt-mode'),
+  status: document.getElementById('yt-status'),
+  next: document.getElementById('yt-next'),
+};
+
+const clock = (iso) => new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+function renderUploads(view) {
+  const yt = view.youtube;
+  up.box.hidden = false;
+  up.connect.textContent = !yt.keys ? 'Needs keys in .env' : yt.connected ? 'Connected · reconnect' : 'Connect';
+  up.connect.toggleAttribute('aria-disabled', !yt.keys);
+  if (document.activeElement !== up.mode) up.mode.value = yt.mode;
+  up.mode.querySelector('[value="on"]').disabled = !yt.connected;
+
+  const bits = [];
+  if (yt.mode === 'off') bits.push('Off: nothing is uploaded.');
+  else {
+    bits.push(`${yt.mode === 'dry-run' ? 'Dry run' : 'Uploading'} · ${yt.today} of ${yt.perDay} today`);
+    if (yt.nextAt) bits.push(`next at ${clock(yt.nextAt)}${yt.waitingFor ? ` (${yt.waitingFor})` : ''}`);
+    bits.push(`every ${Math.round(yt.spacingMinutes / 60)}h, best score first`);
+    if (yt.mode === 'on' && yt.privacy !== 'private') bits.push('Google keeps uploads private until its audit passes');
+  }
+  if (yt.lastError) bits.push(`last error: ${yt.lastError}`);
+  up.status.textContent = bits.join(' · ');
+  up.status.classList.toggle('is-error', Boolean(yt.lastError));
+
+  const posted = yt.recent.map((r) => `${r.status === 'dry-run' ? 'would post' : r.status}: ${r.title || r.file}`);
+  const queued = yt.next.map((c) => `next (${c.score}): ${c.title}`);
+  up.next.replaceChildren(
+    ...[...queued.slice(0, 3), ...posted.slice(0, 3)].map((text) => {
+      const li = document.createElement('li');
+      li.textContent = text;
+      li.title = text;
+      return li;
+    }),
+  );
+}
+
+async function pollUploads(change) {
+  try {
+    const res = await fetch('/api/uploads', change ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(change) } : {});
+    const body = await res.json();
+    if (!res.ok) {
+      up.status.textContent = body.message || `upload settings returned ${res.status}`;
+      up.status.classList.add('is-error');
+      return;
+    }
+    renderUploads(body);
+  } catch {
+    /* the server is restarting; the next poll catches up */
+  }
+}
+
+up.mode.addEventListener('change', () => pollUploads({ platform: 'youtube', mode: up.mode.value }));
+
 // ?demo=1 renders a fixture feed, and automation would act on the real one.
 if (!new URLSearchParams(location.search).has('demo')) {
   pollAutomation();
   setInterval(pollAutomation, AUTO_REFRESH_MS);
+  pollUploads();
+  setInterval(pollUploads, AUTO_REFRESH_MS);
 }

@@ -337,6 +337,16 @@ buttons in the page copy the right one.
   `clips/rejected` are not touched; a short whose copy can't be rebuilt keeps
   its old one.
 
+### Auto upload (YouTube)
+
+With your own Google app's keys in `.env` and **Connect** clicked once,
+the **Auto upload** box posts the best shorts to YouTube by itself: about
+five a day, three hours apart, best engagement score first, each one checked
+again just before it goes. **Dry run** does all of it except the upload and
+logs what it would have posted, so a day can be read before it is real.
+Setup, limits and failure handling: [docs/posting-setup.md](docs/posting-setup.md).
+Instagram and TikTok upload are not built yet.
+
 ### Posting
 
 Each finished short in the panel has **TikTok**, **YouTube** and **Instagram**
@@ -710,6 +720,9 @@ src/clipjobs.js in-memory clip queue, two at a time
 src/shortform.js caption, 9:16 render with text, post copy
 src/autoclip.js which moments to cut, and cutting them
 src/automation.js channel automation: the panel's channels, switch, shorts
+src/uploader.js auto upload: which shorts, when, and every way one can fail
+src/youtube.js  YouTube sign-in and resumable upload, through the owner's app
+src/recopy.js   npm run recopy: rewrite the post copy of shorts already made
 src/archive.js  where a live channel is recording, and its game, without credentials
 src/live.js     recording a live stream with no VOD, and cutting from it
 src/transcribe.py speech to timed words (faster-whisper), for subtitles and titles

@@ -16,6 +16,8 @@ test("the game comes from the short's own record, never a default", () => {
   assert.match(fortnite.platforms.tiktok, /#fortnite/);
   assert.ok(!/#gta/.test(Object.values(fortnite.platforms).join(' ')));
   assert.equal(fortnite.link, 'https://x');
+  // And the ready-made YouTube copy carries it too.
+  assert.match(fortnite.platforms.youtube, /Full stream: https:\/\/x/);
 
   // Nothing recorded about the game: no game tag at all.
   const unknown = recopy({ file: 'tarik-1-t000000-x.mp4', oldText: 'Wait what 😱\n\n#gta6 #gtavi #tarik\n' });

@@ -518,7 +518,7 @@ export function youtubeTitle(about, moment) {
  */
 export function postPartsFor(
   moment,
-  { caption, start, hashtags = null, about = null, quote = null, avoid = [], mild = true, reaction: given = null } = {},
+  { caption, start, hashtags = null, about = null, quote = null, avoid = [], mild = true, reaction: given = null, link: knownLink = null } = {},
 ) {
   const who = String(moment?.broadcaster || '').trim();
   const vod = String(moment?.vodId || '').replace(/^v/, '');
@@ -540,7 +540,8 @@ export function postPartsFor(
   const tiktokHook = fitText(`${line ? `"${line}"` : what} ${emoji}`.trim().toLowerCase(), TIKTOK_HOOK_MAX);
   const instaHook = fitText(`${what}${line ? ` — "${line}"` : ''} ${emoji}`.trim(), INSTAGRAM_HOOK_MAX);
   const credit = who ? `Credit: ${who} on Twitch` : '';
-  const link = vod ? `https://www.twitch.tv/videos/${vod}?t=${twitchTime(start)}` : '';
+  // A link worked out when the short was made is kept as it was.
+  const link = knownLink || (vod ? `https://www.twitch.tv/videos/${vod}?t=${twitchTime(start)}` : '');
 
   return {
     caption: title,

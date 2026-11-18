@@ -810,6 +810,61 @@ select {
   font-weight: 500;
 }
 
+.uploads {
+  margin: 12px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-2);
+  font-size: 13px;
+}
+
+.uploads-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.uploads-platform {
+  color: var(--muted);
+}
+
+.uploads-connect {
+  color: var(--fresh);
+}
+
+.uploads-mode select {
+  margin-left: 6px;
+}
+
+.uploads-status {
+  margin: 8px 0 4px;
+  color: var(--muted);
+}
+
+.uploads-status.is-error {
+  color: var(--danger);
+}
+
+.uploads-list {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+}
+
+.uploads-list li {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.uploads-note {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .auto-scope select {
   margin-left: 6px;
 }

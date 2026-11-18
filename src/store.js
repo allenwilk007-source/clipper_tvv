@@ -98,6 +98,25 @@ create table if not exists autoclips (
   finished_at    text
 );
 create index if not exists autoclips_by_created on autoclips(created_at);
+
+-- Every upload of a short to a platform, claimed BEFORE it starts. One row per
+-- (file, platform), so nothing is ever posted twice, restart or not. A row
+-- left 'uploading' by a crash is never retried on its own: the video may have
+-- landed, and a duplicate is found out from the platform, not from here.
+-- Dry runs are kept under their own platform name ('youtube:dry').
+create table if not exists uploads (
+  file        text not null,
+  platform    text not null,
+  status      text not null,   -- uploading | done | failed | refused | uncertain | dry-run
+  video_id    text,
+  title       text,
+  score       integer,
+  error       text,
+  started_at  text not null,
+  finished_at text,
+  primary key (file, platform)
+);
+create index if not exists uploads_by_started on uploads(platform, started_at);
 `;
 
 // node:sqlite refuses to bind `undefined`, and a single missing field would
@@ -433,6 +452,58 @@ export class Store {
   markInterruptedAutoclips({ at = new Date() } = {}) {
     const result = this.db
       .prepare(`update autoclips set status = 'interrupted', finished_at = ? where status = 'queued'`)
+      .run(at.toISOString());
+    return result.changes ?? 0;
+  }
+
+  /** Claim (file, platform) for an upload. False if it was ever claimed before. */
+  claimUpload({ file, platform, title = null, score = null, at = new Date() }) {
+    const result = this.db
+      .prepare(
+        `insert into uploads (file, platform, status, title, score, started_at)
+         values (?, ?, 'uploading', ?, ?, ?)
+         on conflict (file, platform) do update set
+           status = 'uploading', title = excluded.title, score = excluded.score,
+           started_at = excluded.started_at, error = null, finished_at = null
+         -- only a transport failure is ever tried again
+         where uploads.status = 'retry'`,
+      )
+      .run(file, platform, nul(title), int(score), at.toISOString());
+    return (result.changes ?? 0) === 1;
+  }
+
+  finishUpload({ file, platform, status, videoId = null, error = null, at = new Date() }) {
+    this.db
+      .prepare(`update uploads set status = ?, video_id = ?, error = ?, finished_at = ? where file = ? and platform = ?`)
+      .run(status, nul(videoId), nul(error), at.toISOString(), file, platform);
+  }
+
+  /** Uploads to a platform started at or after `since`, oldest first. */
+  uploadsSince(platform, since) {
+    return this.db
+      .prepare(`select * from uploads where platform = ? and started_at >= ? order by started_at asc`)
+      .all(platform, new Date(since).toISOString());
+  }
+
+  uploadedFiles(platform) {
+    return new Set(
+      this.db.prepare("select file from uploads where platform = ? and status != 'retry'").all(platform).map((r) => r.file),
+    );
+  }
+
+  lastUpload(platform) {
+    // Shorts set aside by the checks never reached the platform: no spacing owed.
+    return (
+      this.db
+        .prepare("select * from uploads where platform = ? and status != 'skipped' order by started_at desc limit 1")
+        .get(platform) || null
+    );
+  }
+
+  /** Rows a crash left mid-upload: not retried, shown for a person to check. */
+  markInterruptedUploads({ at = new Date() } = {}) {
+    const result = this.db
+      .prepare(`update uploads set status = 'uncertain', error = 'interrupted mid-upload: check the channel', finished_at = ? where status = 'uploading'`)
       .run(at.toISOString());
     return result.changes ?? 0;
   }

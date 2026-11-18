@@ -66,10 +66,9 @@ export function recopy({ file, saved = null, record = null, oldText = '', avoid 
   };
   const reaction = reactionFromEmoji(caption);
   const about = describe(moment, { avoid, reaction });
-  const parts = postPartsFor(moment, { caption, about, avoid, reaction });
   // The stream link was worked out when the short was made; keep it as it was.
-  parts.link = saved?.link || /^Full stream: (\S+)/m.exec(oldText)?.[1] || '';
-  return parts;
+  const link = saved?.link || /^Full stream: (\S+)/m.exec(oldText)?.[1] || '';
+  return postPartsFor(moment, { caption, about, avoid, reaction, link });
 }
 
 export async function recopyAll({ dir = join(config.root, 'clips', 'ready'), dbPath = join(config.root, 'data', 'feed.db'), log = console.log } = {}) {
