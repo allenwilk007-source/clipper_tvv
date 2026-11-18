@@ -58,8 +58,24 @@ export function leadTimeSeconds(clips) {
  */
 export function evaluate(rows, { topN = 20, decile = 0.1 } = {}) {
   const scored = rows.filter((row) => Number.isFinite(row.opportunity) && Number.isFinite(row.views));
-  if (scored.length < 2) {
-    return { population: scored.length, enough: false };
+  // precision@N needs a population several times N before it measures the
+  // RANKING rather than the arithmetic. Two separate artifacts bite:
+  //
+  //   n <= topN   every moment is already inside the "top N", so precision is
+  //               the base rate and lift is exactly 1 however good the ranking
+  //               is — a PERFECT ranking scores 1.00x at n=20.
+  //   n ~= 2*topN the top N is half the population, so it catches the winners
+  //               by coverage alone — a BLIND ranking scores 2.00x at n=40,
+  //               which is also the ceiling, i.e. full marks for nothing.
+  //
+  // Measured on synthetic perfect-vs-blind rankings: 40 -> 2.00x vs 2.00x,
+  // 60 -> 3.00x vs 1.50x, 100 -> 5.00x vs 1.00x. The separation is only clean
+  // from 5*topN, where the top N is a fifth of the field, so that is the floor.
+  // Reporting a number below it would retire a working signal, or bless a
+  // worthless one, on the strength of the sample size.
+  const needed = topN * 5;
+  if (scored.length < needed) {
+    return { population: scored.length, enough: false, needed, topN };
   }
 
   // "Best" = top decile by views at the horizon. At least one moment always
@@ -103,6 +119,11 @@ export function evaluate(rows, { topN = 20, decile = 0.1 } = {}) {
     chance,
     // Above 1 means the ranking beats a coin flip. This is the headline.
     lift: chance ? precision / chance : null,
+    // The most this population could possibly show, since the winners set is a
+    // decile of it: the ceiling is 2x at 40 moments and 10x at 200. Without it
+    // a modest lift reads as a weak signal when it may be the maximum the
+    // sample can express.
+    maxLift: chance ? Math.min(cut, topN) / top.length / chance : null,
     medianLeadTop: median(leads(top)),
     medianLeadAll: median(leads(scored)),
     medianViewsTop: median(top.map((row) => row.views)),
@@ -150,7 +171,10 @@ function report(horizonName, result) {
   console.log(`\n  horizon ${horizonName}`);
 
   if (!result.enough) {
-    console.log(`    only ${result.population} scored moment(s) — not enough to say anything.`);
+    console.log(
+      `    only ${result.population} scored moment(s) — need ${result.needed} before`,
+    );
+    console.log('    precision@N can differ from chance at all. Not enough data.');
     return;
   }
 
@@ -160,9 +184,9 @@ function report(horizonName, result) {
   );
   console.log(`    chance            ${pct(result.chance)}  picking at random`);
   console.log(
-    `    lift              ${result.lift == null ? '—' : `${result.lift.toFixed(2)}x`}  ${
-      result.lift > 1 ? 'the ranking beats chance' : 'the ranking does NOT beat chance'
-    }`,
+    `    lift              ${result.lift == null ? '—' : `${result.lift.toFixed(2)}x`} of a possible ${
+      result.maxLift == null ? '—' : `${result.maxLift.toFixed(2)}x`
+    }  ${result.lift > 1 ? 'the ranking beats chance' : 'the ranking does NOT beat chance'}`,
   );
   console.log(`    median views      top ${result.medianViewsTop} vs all ${result.medianViewsAll}`);
   console.log(

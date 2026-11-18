@@ -203,7 +203,36 @@ doing something.** Nothing that claims to improve detection ships without
 moving that number — including the reaction weights in `src/reactions.js`,
 which are a starting position rather than a result.
 
-With no history it says so, rather than printing a confident zero.
+#### It refuses to score a small sample, on purpose
+
+`eval` prints nothing until a horizon has **100 moments with an outcome**, and
+that floor is not caution — below it the number is arithmetic, not evidence.
+Two artifacts bite at small populations, measured on synthetic perfect-vs-blind
+rankings:
+
+| population | perfect ranking | blind ranking |
+| --- | --- | --- |
+| 20 (= topN) | 1.00x | 1.00x |
+| 40 (= 2 x topN) | 2.00x | 2.00x |
+| 60 | 3.00x | 1.50x |
+| 100 (= 5 x topN) | 5.00x | 1.00x |
+
+At or below `topN` every moment is already inside the "top 20", so precision is
+the base rate and lift is exactly 1.0 **however good the ranking is** — a
+flawless ranking reads as "does not beat chance". A little above it the top 20
+is half the field and catches the winners by coverage alone, so a *blind*
+ranking scores full marks. Only from 5 x topN do the two separate cleanly, so
+that is where the floor sits. Reporting a number before then would retire a
+working signal, or bless a worthless one, on the strength of the sample size.
+`src/eval.test.js` pins all three cases.
+
+For the same reason the lift is printed against its ceiling — `4.50x of a
+possible 6.00x` — because the winners set is a decile of the population, so the
+best achievable lift is itself a function of how much data there is (6x at 120
+moments, 10x at 200+). A bare "2.00x" hides whether that was most of what the
+sample could show or barely any of it.
+
+With no history at all it says so, rather than printing a confident zero.
 
 ### What is kept, and what is not
 

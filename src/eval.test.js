@@ -198,3 +198,54 @@ test('the longitudinal tables are never pruned', () => {
   assert.equal(counts.outcomes, 1);
   store.close();
 });
+
+const ranked = (n, viewsFor) =>
+  Array.from({ length: n }, (_, i) => ({
+    momentId: `m${i}`,
+    opportunity: i,
+    views: viewsFor(i, n),
+    source: 'clips',
+    leadTimeSeconds: 60,
+  }));
+
+test('a perfect ranking below the floor is refused, not scored as chance', () => {
+  // opportunity exactly proportional to views: there is no better ranking than
+  // this one, so anything the metric says against it is the metric's fault.
+  const perfect = (n) => ranked(n, (i) => i * 10);
+
+  // At or below topN every moment already sits inside the top N, so precision
+  // is the base rate and lift is exactly 1. The old floor of 2 published that
+  // as "does not beat chance" for a flawless ranking.
+  const small = evaluate(perfect(20), { topN: 20 });
+  assert.equal(small.enough, false);
+  assert.equal(small.needed, 100);
+
+  // Twice topN is refused too, and for the opposite reason: there the top N is
+  // half the field, so a BLIND ranking catches every winner by coverage and
+  // also scores the ceiling. A number here cannot distinguish the two.
+  assert.equal(evaluate(perfect(40), { topN: 20 }).enough, false);
+
+  const scored = evaluate(perfect(100), { topN: 20 });
+  assert.equal(scored.enough, true);
+  assert.equal(scored.lift, 5);
+});
+
+test('a blind ranking is not blessed by a small population', () => {
+  // The same rows that earn a blind ranking full marks at n=40 must earn it
+  // nothing once the population is big enough to tell.
+  const blind = (n) => ranked(n, (i) => ((i * 37) % 100) * 10);
+  assert.equal(evaluate(blind(40), { topN: 20 }).enough, false);
+  assert.equal(evaluate(blind(100), { topN: 20 }).lift, 1);
+});
+
+test('a measured lift is reported against the best the sample could show', () => {
+  // The winners set is a decile of the population, so the ceiling moves with n:
+  // 5x at 100 moments, 10x at 200. A 2x that was all 2x could ever be is not a
+  // weak signal, and the report must not let those two read the same.
+  const result = evaluate(ranked(100, (i) => i * 10), { topN: 20 });
+  assert.equal(result.maxLift, 5);
+  assert.equal(result.lift, result.maxLift);
+
+  const bigger = evaluate(ranked(200, (i) => i * 10), { topN: 20 });
+  assert.equal(bigger.maxLift, 10);
+});

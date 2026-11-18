@@ -53,10 +53,10 @@ async function main() {
     leadInSeconds: config.leadInSeconds,
   });
 
-  const counts = { fresh: 0, warm: 0, flooded: 0 };
+  const counts = { early: 0, fresh: 0, warm: 0, flooded: 0 };
   for (const moment of moments) counts[moment.state] += 1;
 
-  console.log(`\n${moments.length} moments  (fresh ${counts.fresh}, warm ${counts.warm}, flooded ${counts.flooded})\n`);
+  console.log(`\n${moments.length} moments  (early ${counts.early}, fresh ${counts.fresh}, warm ${counts.warm}, flooded ${counts.flooded})\n`);
   console.log(`  ${pad('sat', 5)}${pad('state', 9)}${pad('broadcaster', 22)}link`);
   for (const moment of moments.slice(0, 15)) {
     console.log(
