@@ -119,12 +119,32 @@ h1 {
   color: #fff;
 }
 
-.sort {
+.controls-right {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: center;
+}
+
+.sort,
+.toggle {
   display: flex;
   gap: 8px;
   align-items: center;
   color: var(--muted);
   font-size: 13px;
+}
+
+.toggle {
+  cursor: pointer;
+  user-select: none;
+}
+
+.toggle input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+  cursor: pointer;
 }
 
 select {
@@ -257,19 +277,74 @@ select {
   color: var(--warm);
 }
 
-.open {
+.actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.open,
+.clip {
   padding: 9px 14px;
   border: 1px solid var(--line);
   border-radius: 9px;
   background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
   font-size: 13px;
   font-weight: 600;
   text-decoration: none;
   white-space: nowrap;
 }
 
-.open:hover {
+.open:hover,
+.clip:not(:disabled):hover {
   border-color: var(--accent);
+}
+
+.clip {
+  cursor: pointer;
+}
+
+.clip:not(:disabled) {
+  border-color: #3b2d66;
+  background: rgba(138, 99, 244, 0.16);
+}
+
+.clip:disabled {
+  color: var(--flooded);
+  cursor: not-allowed;
+}
+
+/* ---------- clip job status ---------- */
+
+.clip-status {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.clip-status code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #0a0c10;
+  color: #cfd6e4;
+  font-size: 11px;
+}
+
+.clip-status.is-queued,
+.clip-status.is-running {
+  color: var(--accent);
+}
+
+.clip-status.is-done {
+  color: var(--fresh);
+}
+
+.clip-status.is-failed {
+  color: var(--danger);
 }
 
 /* ---------- notices ---------- */
@@ -315,8 +390,13 @@ select {
     grid-template-columns: 60px 1fr;
   }
 
-  .open {
+  .actions {
     grid-column: 1 / -1;
+  }
+
+  .open,
+  .clip {
+    flex: 1;
     text-align: center;
   }
 }

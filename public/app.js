@@ -1,17 +1,29 @@
 const REFRESH_MS = 15_000;
 
+const JOB_POLL_MS = 1200;
+
 const els = {
   game: document.getElementById('game'),
   stats: document.getElementById('stats'),
   feed: document.getElementById('feed'),
   filters: document.getElementById('filters'),
   sort: document.getElementById('sort'),
+  vertical: document.getElementById('vertical'),
   template: document.getElementById('card-template'),
 };
 
 let filter = 'all';
 let sort = 'opportunity';
 let latest = null;
+
+// Cards are rebuilt from scratch on every feed poll, so clip state cannot live
+// in the DOM or it would vanish mid-download. Keyed by moment id; `cards`
+// tracks which node is currently showing each moment so a job update repaints
+// one card instead of re-rendering (and re-sorting) the whole feed under the
+// operator's cursor.
+const clipJobs = new Map();
+const cards = new Map();
+let jobTimer = null;
 
 const SORTERS = {
   opportunity: (a, b) => b.opportunity - a.opportunity,
@@ -100,7 +112,122 @@ function buildCard(moment) {
   open.href = moment.deepLink;
   open.textContent = moment.vodId ? 'Open at moment' : 'Open clip';
 
+  const clip = node.querySelector('.clip');
+  if (!canClip(moment)) {
+    // Without a VOD id and offset there is nothing to cut from: these are the
+    // moments whose position Twitch has not published yet.
+    clip.disabled = true;
+    clip.title = 'No VOD position yet — Twitch publishes it a minute or two late';
+  } else {
+    clip.addEventListener('click', () => startClip(moment));
+  }
+
+  cards.set(moment.id, node);
+  paintClip(moment.id);
+
   return node;
+}
+
+const canClip = (moment) => Boolean(moment.vodId) && Number.isFinite(moment.offsetSeconds);
+
+function paintClip(momentId) {
+  const node = cards.get(momentId);
+  const job = clipJobs.get(momentId);
+  if (!node) return;
+
+  const button = node.querySelector('.clip');
+  const status = node.querySelector('.clip-status');
+
+  if (!job) {
+    status.hidden = true;
+    return;
+  }
+
+  const busy = job.state === 'queued' || job.state === 'running';
+  button.disabled = busy;
+  button.textContent = busy ? 'Clipping…' : job.state === 'done' ? 'Clip again' : 'Retry clip';
+
+  status.hidden = false;
+  status.className = `clip-status is-${job.state}`;
+
+  // textContent, not innerHTML: a failure message is yt-dlp's words about a
+  // Twitch page, and those are not ours to trust with markup.
+  status.textContent = '';
+  const say = (text, tag = 'span') => {
+    const el = document.createElement(tag);
+    el.textContent = text;
+    status.append(el);
+  };
+
+  if (job.state === 'done') {
+    say('Saved ');
+    say(job.path, 'code');
+    if (job.verticalPath) {
+      say(' · 9:16 ');
+      say(job.verticalPath, 'code');
+    }
+    return;
+  }
+  if (job.state === 'failed') {
+    say(`Clip failed: ${job.message}`);
+    return;
+  }
+
+  const percent = job.state === 'running' && job.progress ? ` ${job.progress}%` : '';
+  say(`${job.state}${percent} — ${job.message || 'working'}`);
+}
+
+async function startClip(moment) {
+  clipJobs.set(moment.id, { state: 'queued', progress: 0, message: 'queued' });
+  paintClip(moment.id);
+
+  try {
+    const res = await fetch('/api/clip', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        vodId: moment.vodId,
+        offsetSeconds: moment.offsetSeconds,
+        broadcaster: moment.broadcaster,
+        momentId: moment.id,
+        vertical: els.vertical.checked,
+      }),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.message || `server returned ${res.status}`);
+    clipJobs.set(moment.id, body.job);
+  } catch (err) {
+    clipJobs.set(moment.id, { state: 'failed', message: err.message });
+  }
+
+  paintClip(moment.id);
+  watchJobs();
+}
+
+/** One ticker for every in-flight job, stopped as soon as none are left. */
+function watchJobs() {
+  if (jobTimer) return;
+  jobTimer = setInterval(async () => {
+    const active = [...clipJobs].filter(
+      ([, job]) => job.id && (job.state === 'queued' || job.state === 'running'),
+    );
+    if (!active.length) {
+      clearInterval(jobTimer);
+      jobTimer = null;
+      return;
+    }
+    for (const [momentId, job] of active) {
+      try {
+        const res = await fetch(`/api/clip/${job.id}`);
+        if (!res.ok) continue;
+        const body = await res.json();
+        clipJobs.set(momentId, body.job);
+      } catch {
+        // A dropped poll is not a failed job; the next tick will catch up.
+      }
+      paintClip(momentId);
+    }
+  }, JOB_POLL_MS);
 }
 
 function render() {
@@ -130,6 +257,7 @@ function render() {
   }
 
   const frag = document.createDocumentFragment();
+  cards.clear();
   for (const moment of shown.slice(0, 150)) frag.append(buildCard(moment));
   els.feed.innerHTML = '';
   els.feed.append(frag);

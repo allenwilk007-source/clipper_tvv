@@ -59,6 +59,78 @@ npm run check
 That resolves the category, counts live channels, pulls the clip window, and
 prints the moments it clusters into.
 
+## Clipping a moment
+
+Every card has a **Clip it** button. It cuts the moment out of the broadcaster's
+VOD and writes an mp4 into `clips/` — on your own disk, nowhere else. The feed
+still only ever indexes and links; nothing here uploads, posts, or rehosts
+anything, and that is deliberate rather than unfinished.
+
+### Setup
+
+ffmpeg must be on `PATH`, and yt-dlp installed:
+
+```bash
+python -m pip install yt-dlp
+```
+
+The default invocation is `python -m yt_dlp` (set `YTDLP_CMD` to change it)
+because the `yt-dlp` console-script shim hits a permission error on some
+Windows installs while the module form works fine.
+
+**Do not reach for streamlink.** It is the obvious tool for this and it cannot
+work on a current Python: streamlink needs `pycryptodome` for HLS AES, and
+pycryptodome has no Python 3.14 wheel, so `Crypto.Cipher._raw_aes` fails to
+import and every HLS stream dies at the first segment. `--force-reinstall`
+does not fix it. An hour has already been spent confirming that; yt-dlp does
+the same job here.
+
+### Why the window is lopsided
+
+`CLIP_PRE=25`, `CLIP_POST=5` — twenty-five seconds *before* the timestamp and
+five after.
+
+Both signals that put a moment in the feed are reactions. Chat types after the
+thing lands. A clipper hits the hotkey after they have already watched it
+happen. So the timestamp the feed hands you is the *tail* of the moment, not
+its start, and a window centred on it would capture the crowd reacting while
+cutting off whatever they were reacting to. The pre-roll is where the clip
+actually is.
+
+The cut uses `--download-sections` with `--force-keyframes-at-cuts`, so only
+the relevant segments are fetched and the boundaries land on the second asked
+for rather than the nearest keyframe (on Twitch, up to two seconds away). The
+flag costs a re-encode: a 30s cut at 1080p60 takes around 100 seconds, at 720p
+around five. Lower `CLIP_QUALITY` if that matters more than resolution.
+
+### Vertical
+
+Ticking **9:16 copy** writes a second file alongside the first, sized 1080x1920
+for Shorts and TikTok. It is not a centre crop — a centre crop of 16:9 throws
+away two thirds of the width, and in GTA the thing worth clipping is as often
+at the edge of frame as in the middle. Instead a zoomed, blurred copy fills the
+tall canvas and the whole original frame sits centred on top of it.
+
+### API
+
+The button is a thin wrapper over two endpoints, so a script can do the same:
+
+```bash
+curl -X POST http://localhost:3000/api/clip   -H 'content-type: application/json'   -d '{"vodId":"2931538239","offsetSeconds":3025,"vertical":false}'
+# -> 202 {"job":{"id":"...","state":"queued"}, ...}
+
+curl http://localhost:3000/api/clip/<id>
+# -> {"job":{"state":"running","progress":44,"message":"cutting 13s", ...}}
+```
+
+Jobs live in memory and run two at a time (`CLIP_CONCURRENCY`), because each
+one is an ffmpeg re-encode and a third just makes the clip someone is waiting
+on slower. They are lost on restart; the mp4 is the artefact worth keeping.
+
+Note that in `?demo=1` the VOD ids are synthetic, so **Clip it** there will
+fail with "Video 21 does not exist". That is the fixture being honest, not a
+bug — the button needs a real moment.
+
 ## How a moment gets ranked
 
 ```
@@ -124,10 +196,18 @@ Worth reading before launch night rather than during it.
 - **Saturation is Twitch-native only.** It counts clips made *on Twitch*. It
   does not know whether a moment has already flooded TikTok — that's a leading
   indicator of flooding, not a measure of it.
-- **Not verified against live data.** Every path has been exercised against the
-  demo fixture and the clustering and ranking are covered by tests, but no run
-  against a real category has happened yet. The first real run is the real
-  test.
+- **A clip is only as good as the VOD.** If the broadcaster has VODs disabled,
+  or the moment is in a muted or already-deleted segment, the cut fails with
+  whatever Twitch says about it. Nothing can be done from this end.
+- **Rockstar removes story and spoiler clips**, including after launch, and
+  in-game radio music triggers Content ID. Both are reasons to watch what you
+  cut, and neither is something the tool can detect for you.
+- **The feed is not verified against live data.** Every path has been exercised
+  against the demo fixture and the clustering and ranking are covered by tests,
+  but no run against a real category has happened yet. The first real run is
+  the real test. (Clipping is the exception: it has been run end to end against
+  a real public VOD and produces a playable mp4 of exactly the requested
+  length.)
 
 ## Configuration
 
@@ -144,6 +224,8 @@ src/twitch.js   Helix client — app token, rate limits, pagination
 src/moments.js  clustering + the ranking formula (the product)
 src/chat.js     pooled anonymous IRC, median/MAD spike scoring
 src/feed.js     polling loops and current state
+src/clip.js     VOD section download + 9:16 render (yt-dlp/ffmpeg)
+src/clipjobs.js in-memory clip queue, two at a time
 src/server.js   HTTP + static
 src/demo.js     fixture, pushed through the real pipeline
 src/check.js    one-shot smoke test

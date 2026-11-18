@@ -23,15 +23,21 @@
         <button class="chip" data-filter="warm">Warm</button>
         <button class="chip" data-filter="flooded">Flooded</button>
       </div>
-      <label class="sort">
-        Sort
-        <select id="sort">
-          <option value="opportunity">Opportunity</option>
-          <option value="newest">Newest</option>
-          <option value="saturation">Most clipped</option>
-          <option value="chat">Chat spike</option>
-        </select>
-      </label>
+      <div class="controls-right">
+        <label class="toggle" title="Also render a 9:16 copy for Shorts/TikTok">
+          <input type="checkbox" id="vertical" />
+          9:16 copy
+        </label>
+        <label class="sort">
+          Sort
+          <select id="sort">
+            <option value="opportunity">Opportunity</option>
+            <option value="newest">Newest</option>
+            <option value="saturation">Most clipped</option>
+            <option value="chat">Chat spike</option>
+          </select>
+        </label>
+      </div>
     </nav>
 
     <main id="feed" class="feed"></main>
@@ -50,8 +56,12 @@
           </div>
           <p class="title"></p>
           <div class="meta"></div>
+          <div class="clip-status" hidden></div>
         </div>
-        <a class="open" target="_blank" rel="noopener">Open at moment</a>
+        <div class="actions">
+          <a class="open" target="_blank" rel="noopener">Open at moment</a>
+          <button class="clip" type="button">Clip it</button>
+        </div>
       </article>
     </template>
 

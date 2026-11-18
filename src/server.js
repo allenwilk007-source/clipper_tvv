@@ -2,8 +2,14 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize, sep } from 'node:path';
 
+import { clipWindow, normalizeVodId } from './clip.js';
+import { clipQueueStatus, enqueueClip, getClipJob, publicJob } from './clipjobs.js';
 import { config, credentialsMissing, root } from './config.js';
 import { Feed } from './feed.js';
+
+// Enough for the biggest plausible clip request and nothing like enough to be
+// worth sending as a denial-of-service payload.
+const MAX_BODY_BYTES = 4096;
 
 const PUBLIC_DIR = join(root, 'public');
 
@@ -25,6 +31,36 @@ function sendJson(res, status, payload) {
     'cache-control': 'no-store',
   });
   res.end(body);
+}
+
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        reject(new Error('request body too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8').trim();
+      if (!raw) {
+        resolve({});
+        return;
+      }
+      try {
+        const parsed = JSON.parse(raw);
+        resolve(parsed && typeof parsed === 'object' ? parsed : {});
+      } catch {
+        reject(new Error('body is not JSON'));
+      }
+    });
+    req.on('error', reject);
+  });
 }
 
 async function sendStatic(res, urlPath) {
@@ -74,6 +110,64 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // POST /api/clip  {vodId, offsetSeconds, pre, post, vertical}  ->  {id}
+  //
+  // The work is a subprocess that outlives any sane request timeout, so this
+  // only validates and queues. GET /api/clip/:id reports the rest.
+  if (url.pathname === '/api/clip' && req.method === 'POST') {
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch (err) {
+      sendJson(res, 400, { error: 'bad_request', message: err.message });
+      return;
+    }
+
+    // Validate here, not in the worker: a bad vodId should come back as a 400
+    // the card can show, not as a failed job the operator has to go read.
+    let vodId;
+    let window;
+    try {
+      vodId = normalizeVodId(body.vodId);
+      window = clipWindow({
+        offsetSeconds: body.offsetSeconds,
+        pre: body.pre,
+        post: body.post,
+      });
+    } catch (err) {
+      sendJson(res, 400, { error: 'bad_request', message: err.message });
+      return;
+    }
+
+    const job = enqueueClip({
+      vodId,
+      offsetSeconds: window.offset,
+      pre: window.pre,
+      post: window.post,
+      vertical: Boolean(body.vertical),
+      broadcaster: typeof body.broadcaster === 'string' ? body.broadcaster : '',
+      momentId: typeof body.momentId === 'string' ? body.momentId : null,
+    });
+
+    sendJson(res, 202, { job: publicJob(job), queue: clipQueueStatus(), window });
+    return;
+  }
+
+  if (url.pathname.startsWith('/api/clip/')) {
+    const job = getClipJob(decodeURIComponent(url.pathname.slice('/api/clip/'.length)));
+    if (!job) {
+      sendJson(res, 404, { error: 'unknown_job', message: 'no such clip job' });
+      return;
+    }
+    sendJson(res, 200, { job: publicJob(job), queue: clipQueueStatus() });
+    return;
+  }
+
+  if (url.pathname === '/api/clip') {
+    sendJson(res, 405, { error: 'method_not_allowed', message: 'POST a clip request here' });
+    return;
+  }
+
   if (url.pathname === '/api/status') {
     sendJson(res, 200, {
       ok: !credentialsMissing,
@@ -81,6 +175,7 @@ const server = createServer(async (req, res) => {
       game: feed.game ? { id: feed.game.id, name: feed.game.name } : null,
       started: feed.started,
       lastError: feed.lastError,
+      clips: { ...clipQueueStatus(), dir: config.clipDir },
     });
     return;
   }

@@ -51,6 +51,16 @@ export const config = {
   leadInSeconds: num(process.env.LEAD_IN_SECONDS, 20),
   chatChannels: num(process.env.CHAT_CHANNELS, 80),
   chatEnabled: process.env.CHAT_ENABLED !== 'false',
+
+  // Local clip extraction. The window is lopsided on purpose: see clip.js.
+  clipPre: num(process.env.CLIP_PRE, 25),
+  clipPost: num(process.env.CLIP_POST, 5),
+  clipDir: resolve(root, process.env.CLIP_DIR || 'clips'),
+  clipQuality: process.env.CLIP_QUALITY || '1080',
+  clipConcurrency: num(process.env.CLIP_CONCURRENCY, 2),
+  // The console scripts shim is broken on some Windows installs, so the
+  // module form is the default and the whole command stays configurable.
+  ytdlpCmd: process.env.YTDLP_CMD || 'python -m yt_dlp',
 };
 
 export const credentialsMissing = !config.clientId || !config.clientSecret;
