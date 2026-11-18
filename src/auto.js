@@ -42,7 +42,8 @@ function summary() {
   feed.log(
     `autocollect: ${done} ready, ${failed} failed, ${queued - done - failed} in progress ` +
       `(${queue.running} running, ${queue.queued} waiting) · ${lastHour} cut in the last hour` +
-      (reasons ? ` · last poll passed over: ${reasons}` : ''),
+      (reasons ? ` · last poll passed over: ${reasons}` : '') +
+      (automation.health.level !== 'ok' ? ` · WARNING: ${automation.health.message}` : ''),
   );
 }
 

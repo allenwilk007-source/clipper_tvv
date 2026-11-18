@@ -228,6 +228,7 @@ export class AutoClipper {
     this.cuts = this.cuts.filter((cut) => now - cut.at < 24 * HOUR);
     const { picks, skipped } = selectForAutoclip(moments, { now, cuts: this.cuts, cfg: this.cfg });
     this.lastSkipped = skipped;
+    this.lastPicks = picks.length;
     return picks.map((moment) => this.cut(moment, now)).filter(Boolean);
   }
 

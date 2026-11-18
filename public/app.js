@@ -732,7 +732,11 @@ function renderAutomation(view) {
   auto.scopeWrap.hidden = view.mode !== 'full';
   if (view.scope) auto.scope.value = view.scope;
   renderChannels(view);
-  auto.status.textContent = statusLine(view);
+  // A collector that cannot cut anything says so, instead of looking healthy.
+  const health = view.health?.level !== 'ok' && view.health?.message ? ` · ${view.health.message}` : '';
+  auto.status.textContent = statusLine(view) + health;
+  auto.status.classList.toggle('is-warn', view.health?.level === 'warn');
+  auto.status.classList.toggle('is-error', view.health?.level === 'error');
   renderShorts(view.shorts);
 }
 

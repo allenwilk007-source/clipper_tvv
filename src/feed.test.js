@@ -301,3 +301,89 @@ describe('the full feed with credentials', () => {
     assert.deepEqual(byChannel, { clix: 'Fortnite', lirik: 'Grand Theft Auto VI' });
   });
 });
+
+describe('when a recording lookup fails', () => {
+  it('keeps the recording already known, and tries again soon', async () => {
+    const now = Date.now();
+    let fail = false;
+    const { feed } = chatOnlyFeed([candidate('caseoh_', { at: now })], ['caseoh_'], async () => {
+      if (fail) throw new Error('downloader exited with code 3221225794');
+      return { vodId: '77', startedAt: now - 3600_000, chapters: [{ title: 'Fortnite', start: 0 }] };
+    });
+    open = feed;
+    await feed.start();
+    const channel = feed.channels.get('caseoh_');
+    assert.equal(channel.vodId, '77');
+
+    // Five minutes on, the re-check fails.
+    fail = true;
+    channel.archiveCheckedAt = now - 6 * 60_000;
+    await feed.pollChat();
+
+    // One failed lookup used to wipe this, leaving every moment on the
+    // channel without a game, so all of them were skipped.
+    assert.equal(channel.vodId, '77');
+    assert.deepEqual(channel.chapters, [{ title: 'Fortnite', start: 0 }]);
+    assert.equal(feed.moments[0].game, 'Fortnite');
+    assert.equal(channel.lookupFailures, 1);
+    assert.ok(channel.retryAt - Date.now() <= 30_000 && channel.retryAt - Date.now() > 25_000);
+    assert.equal(feed.lookups.consecutive, 1);
+    assert.match(feed.lookups.lastError, /3221225794/);
+  });
+
+  it('counts the failures in a row, and clears them once a lookup answers', async () => {
+    let fail = true;
+    const { feed } = chatOnlyFeed([candidate('caseoh_')], ['caseoh_'], async () => {
+      if (fail) throw new Error('ETIMEDOUT');
+      return null;
+    });
+    open = feed;
+    await feed.start();
+    const channel = feed.channels.get('caseoh_');
+    channel.retryAt = 0;
+    await feed.pollChat();
+    assert.equal(feed.lookups.consecutive, 2);
+    assert.equal(channel.lookupFailures, 2);
+
+    fail = false;
+    channel.retryAt = 0;
+    await feed.pollChat();
+    assert.equal(feed.lookups.consecutive, 0);
+    assert.equal(channel.lookupFailures, 0);
+    assert.equal(channel.retryAt, null);
+  });
+
+  it('notes a lookup that can never succeed once, instead of retrying it', async () => {
+    let asked = 0;
+    const { feed } = chatOnlyFeed([candidate('zerator')], ['zerator'], async () => {
+      asked += 1;
+      throw new Error('You must be logged into an account that has access to this subscriber-only content');
+    });
+    open = feed;
+    await feed.start();
+    await feed.pollChat();
+    await feed.pollChat();
+    assert.equal(asked, 1);
+    const channel = feed.channels.get('zerator');
+    assert.equal(channel.vodId, null);
+    assert.equal(channel.retryAt, null);
+    assert.match(channel.lookupError, /subscriber-only/);
+    // An answer, not a failure: it does not count against lookup health.
+    assert.equal(feed.lookups.consecutive, 0);
+  });
+});
+
+describe('lookup timing', () => {
+  it('backs off from 30s to 5 minutes, and no further', async () => {
+    const { retryDelay } = await import('./feed.js');
+    assert.deepEqual([1, 2, 3, 4, 5, 9].map(retryDelay), [30_000, 60_000, 120_000, 240_000, 300_000, 300_000]);
+  });
+
+  it('a retry comes before the ordinary re-check', async () => {
+    const { lookupDueAt } = await import('./feed.js');
+    assert.equal(lookupDueAt({}), 0);
+    assert.equal(lookupDueAt({ archiveCheckedAt: 1000, vodId: '7' }), 1000 + 5 * 60_000);
+    assert.equal(lookupDueAt({ archiveCheckedAt: 1000, vodId: null }), 1000 + 10 * 60_000);
+    assert.equal(lookupDueAt({ archiveCheckedAt: 1000, vodId: '7', retryAt: 5000 }), 5000);
+  });
+});

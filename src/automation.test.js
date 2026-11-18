@@ -169,3 +169,33 @@ test('with credentials the list decides what is cut, not what is watched', () =>
   automation.update({ remove: 'xqc' });
   assert.equal(feed.lists.length, 0);
 });
+
+test('an inert collector says so; a healthy one does not', async () => {
+  const { collectorHealth } = await import('./automation.js');
+  // The stuck run, as logged: every moment skipped as unknown-game, every
+  // ten minutes, for 35 minutes, under a line that looked routine.
+  const stuck = collectorHealth({ skipped: { 'unknown-game': 10 }, picks: 0 });
+  assert.equal(stuck.level, 'warn');
+  assert.match(stuck.message, /10 of 10 moments were passed over because their game could not be told/);
+
+  // A healthy live poll, as logged: some unknown-game among many reasons.
+  const busy = collectorHealth({
+    skipped: { 'hourly-limit': 21, 'unknown-game': 10, settling: 6, 'other-game': 3 },
+    picks: 0,
+  });
+  assert.equal(busy.level, 'ok');
+
+  // A quiet poll is not an emergency.
+  assert.equal(collectorHealth({ skipped: { 'unknown-game': 1 } }).level, 'ok');
+});
+
+test('lookups failing over and over is an error, with the reason', async () => {
+  const { collectorHealth } = await import('./automation.js');
+  const health = collectorHealth({
+    skipped: {},
+    lookups: { consecutive: 6, lastError: 'downloader exited with code 3221225794' },
+  });
+  assert.equal(health.level, 'error');
+  assert.match(health.message, /failed 6 times in a row \(last: downloader exited with code 3221225794\)/);
+  assert.match(health.message, /restart the app/);
+});

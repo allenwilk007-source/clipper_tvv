@@ -884,3 +884,12 @@ select {
 .short.is-weak .meter-text {
   color: var(--danger);
 }
+
+.auto-status.is-warn {
+  color: var(--warm);
+}
+
+.auto-status.is-error {
+  color: var(--danger);
+  font-weight: 600;
+}
