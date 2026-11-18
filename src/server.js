@@ -11,6 +11,7 @@ import { Automation, SHORT_FILE, parseRange } from './automation.js';
 import { Feed } from './feed.js';
 import { acquireLock, lockMessage } from './lock.js';
 import { Uploader } from './uploader.js';
+import { StatsCache } from './ytstats.js';
 import * as youtube from './youtube.js';
 
 // Enough for the biggest plausible clip request and nothing like enough to be
@@ -40,6 +41,9 @@ process.on('exit', () => lock.release());
 const feed = new Feed();
 const automation = new Automation({ feed, log: (message) => feed.log(message) });
 const uploader = new Uploader({ store: feed.store, dir: automation.dir, log: (message) => feed.log(message) });
+// Read-only channel stats, shared by every open page so they cannot multiply
+// the quota cost between them.
+const statsCache = new StatsCache();
 
 // Sign-in round trips in flight: the state Google hands back must be one this
 // server sent, or the callback is someone else's and is refused.
@@ -278,6 +282,36 @@ const server = createServer(async (req, res) => {
       }
     }
     sendJson(res, 200, await uploader.view());
+    return;
+  }
+
+  // GET /api/stats -> what the connected channels actually did.
+  //
+  // Read-only, and behind StatsCache's refresh floor so a page left open does
+  // not spend the uploader's quota. ?force=1 is for a person pressing refresh,
+  // not for the page's own polling.
+  if (url.pathname === '/api/stats') {
+    const keys = youtube.youtubeKeys();
+    if (!youtube.hasKeys(keys)) {
+      sendJson(res, 200, { youtube: { keys: false, connected: false } });
+      return;
+    }
+    const saved = await youtube.loadToken();
+    if (!saved?.refreshToken) {
+      sendJson(res, 200, { youtube: { keys: true, connected: false } });
+      return;
+    }
+    try {
+      const token = await youtube.accessToken(keys, saved.refreshToken);
+      const stats = await statsCache.get({ token, force: url.searchParams.has('force') });
+      sendJson(res, 200, { youtube: { keys: true, connected: true, ...stats } });
+    } catch (err) {
+      // A refresh that fails is a sign-in problem, not a stats problem, and
+      // the page should offer Connect rather than a retry.
+      sendJson(res, 200, {
+        youtube: { keys: true, connected: false, error: { kind: 'auth', message: err.message } },
+      });
+    }
     return;
   }
 

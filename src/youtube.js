@@ -15,7 +15,14 @@ import { Readable } from 'node:stream';
 
 import { config } from './config.js';
 
-export const SCOPE = 'https://www.googleapis.com/auth/youtube.upload';
+// Upload, plus read access for the stats dashboard. One sign-in covers both,
+// so the owner consents once; adding the second scope does mean anyone who
+// connected before this change has to connect again, because a refresh token
+// carries the scopes it was granted with.
+export const SCOPE = [
+  'https://www.googleapis.com/auth/youtube.upload',
+  'https://www.googleapis.com/auth/youtube.readonly',
+].join(' ');
 const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const UPLOAD_URL = 'https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status';
