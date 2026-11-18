@@ -6,9 +6,30 @@ import {
   StatsCache,
   fetchStats,
   parseDuration,
+  statsErrorKind,
   summarizeChannel,
   videoRows,
 } from './ytstats.js';
+
+describe('statsErrorKind', () => {
+  it('only a real auth failure counts as a lost sign-in', () => {
+    assert.equal(statsErrorKind({ kind: 'auth' }), 'auth');
+  });
+
+  it('a server error or rate limit is the network, not the sign-in', () => {
+    // Offering Connect for a 503 sends the owner to re-consent over a blip,
+    // which teaches them to click through consent screens without reading.
+    assert.equal(statsErrorKind({ kind: 'transient' }), 'transient');
+    assert.equal(statsErrorKind({ kind: 'quota' }), 'transient');
+  });
+
+  it('an error with no kind at all is transient, not auth', () => {
+    // A dropped connection throws a bare TypeError from fetch. Guessing
+    // "auth" there is the expensive direction to be wrong in.
+    assert.equal(statsErrorKind(new Error('fetch failed')), 'transient');
+    assert.equal(statsErrorKind(undefined), 'transient');
+  });
+});
 
 // Shapes taken from the YouTube Data API v3 reference, trimmed to the fields
 // this reads. Tested against the documented shape rather than a tidier one,

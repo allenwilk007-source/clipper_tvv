@@ -11,7 +11,7 @@ import { Automation, SHORT_FILE, parseRange } from './automation.js';
 import { Feed } from './feed.js';
 import { acquireLock, lockMessage } from './lock.js';
 import { Uploader } from './uploader.js';
-import { StatsCache } from './ytstats.js';
+import { StatsCache, statsErrorKind } from './ytstats.js';
 import * as youtube from './youtube.js';
 
 // Enough for the biggest plausible clip request and nothing like enough to be
@@ -306,10 +306,12 @@ const server = createServer(async (req, res) => {
       const stats = await statsCache.get({ token, force: url.searchParams.has('force') });
       sendJson(res, 200, { youtube: { keys: true, connected: true, ...stats } });
     } catch (err) {
-      // A refresh that fails is a sign-in problem, not a stats problem, and
-      // the page should offer Connect rather than a retry.
+      // Only a real auth failure means the sign-in is gone. A 5xx, a 429 or a
+      // dropped connection is the network, and offering Connect for those
+      // would send the owner to re-consent over a blip.
+      const kind = statsErrorKind(err);
       sendJson(res, 200, {
-        youtube: { keys: true, connected: false, error: { kind: 'auth', message: err.message } },
+        youtube: { keys: true, connected: kind !== 'auth', error: { kind, message: err.message } },
       });
     }
     return;

@@ -85,6 +85,21 @@ export function videoRows(body) {
   });
 }
 
+/**
+ * Is a failed token refresh the sign-in being gone, or just the network?
+ *
+ * Only the first should put a Connect button in front of the owner. A 5xx, a
+ * 429 or a dropped connection is a blip, and sending someone to re-consent
+ * for a blip trains them to click through consent screens without reading —
+ * which is the opposite of what a consent screen is for.
+ *
+ * A raw fetch failure carries no `kind` at all, so an unknown error is
+ * treated as transient rather than as a lost sign-in. Getting that backwards
+ * is the expensive direction: a wrongly-reported auth failure is visible and
+ * annoying, a wrongly-hidden one just retries until it is right.
+ */
+export const statsErrorKind = (err) => (err?.kind === 'auth' ? 'auth' : 'transient');
+
 async function get(path, params, token, fetchImpl) {
   const url = `${API}/${path}?${new URLSearchParams(params)}`;
   const res = await fetchImpl(url, { headers: { authorization: `Bearer ${token}` } });

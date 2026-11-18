@@ -124,16 +124,26 @@ function render(state) {
 
   // An error beside good numbers means the refresh failed, not that the
   // figures are wrong — say which, rather than blanking the page.
+  const headline =
+    { quota: 'Quota reached', transient: 'Could not reach YouTube' }[yt.error?.kind] ||
+    'Could not refresh';
   const banner = yt.error
     ? `<div class="notice is-error">
-         <b>${yt.error.kind === 'quota' ? 'Quota reached' : 'Could not refresh'}.</b>
-         ${yt.error.message}. Showing the last good numbers.
+         <b>${headline}.</b> ${yt.error.message}.
+         ${yt.channel ? 'Showing the last good numbers.' : 'Retrying on the next refresh.'}
        </div>`
     : '';
 
-  els.body.innerHTML = yt.channel
-    ? banner + renderTotals(yt.channel) + renderVideos(yt.videos || [])
-    : banner + '<p class="pending-note">Connected, but this account has no channel.</p>';
+  if (yt.channel) {
+    els.body.innerHTML = banner + renderTotals(yt.channel) + renderVideos(yt.videos || []);
+  } else if (yt.error) {
+    // A failure with nothing cached yet. The banner already says what went
+    // wrong; claiming the account has no channel would be inventing a second,
+    // worse explanation for the same blank.
+    els.body.innerHTML = banner;
+  } else {
+    els.body.innerHTML = '<p class="pending-note">Connected, but this account has no channel.</p>';
+  }
 }
 
 async function poll({ force = false } = {}) {
