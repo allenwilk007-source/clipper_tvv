@@ -457,3 +457,28 @@ test('exceptions to the hourly cap stay bounded across polls', async () => {
   assert.equal(calls.length, 5);
   assert.equal(auto.cuts.filter((c) => c.overCap).length, 5);
 });
+
+test('after a restart, the hour still knows what it cut and what it has to beat', async () => {
+  const store = new Store(':memory:');
+  const busy = { ...cfg, perChannelPerHour: 99, maxPerPoll: 99 };
+  const first = new AutoClipper({ store, enqueue: recorder().enqueue, now: () => NOW, cfg: busy });
+  for (let n = 0; n < 6; n += 1) {
+    await first.onPoll([moment({ id: `a${n}`, vodId: `va${n}`, broadcaster: `c${n}`, opportunity: 10 + n })]);
+  }
+  await first.onPoll([moment({ id: 'over', vodId: 'vover', broadcaster: 'x', opportunity: 50 })]);
+  assert.equal(first.cuts.filter((c) => c.overCap).length, 1);
+
+  // The pre-cut ranking is kept beside each short, for comparing with the meter.
+  assert.equal(store.listAutoclips({ limit: 1 })[0].opportunity, 50);
+
+  const { enqueue, calls } = recorder();
+  const second = new AutoClipper({ store, enqueue, now: () => NOW + 60_000, cfg: busy });
+  second.load();
+  // Not better than the best of the hour (50): held.
+  await second.onPoll([moment({ id: 'meh', vodId: 'vmeh', broadcaster: 'y', opportunity: 30 })]);
+  assert.equal(calls.length, 0);
+  // Better: through, and the earlier exception still counts.
+  await second.onPoll([moment({ id: 'top', vodId: 'vtop', broadcaster: 'z', opportunity: 60 })]);
+  assert.equal(calls.length, 1);
+  assert.equal(second.cuts.filter((c) => c.overCap).length, 2);
+});

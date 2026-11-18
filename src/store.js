@@ -32,7 +32,7 @@ export const HORIZONS = [
 // fresh database free, but an existing one needs to know what it is already
 // holding — Phase 2 adds columns, and by then there will be launch-week data
 // in here that must not be thrown away to get them.
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 const SCHEMA = `
 create table if not exists moments (
@@ -179,8 +179,8 @@ export class Store {
       `),
       insertAutoclip: this.db.prepare(`
         insert into autoclips
-          (moment_id, vod_id, offset_seconds, broadcaster, caption, status, created_at)
-        values (?, ?, ?, ?, ?, 'queued', ?)
+          (moment_id, vod_id, offset_seconds, broadcaster, caption, status, created_at, opportunity, over_cap)
+        values (?, ?, ?, ?, ?, 'queued', ?, ?, ?)
         on conflict(moment_id) do nothing
       `),
       // The caption is final only after the render: it can quote what was
@@ -193,7 +193,7 @@ export class Store {
       `),
       recentAutoclips: this.db.prepare(`
         select moment_id as momentId, vod_id as vodId, offset_seconds as offsetSeconds,
-               broadcaster, status, created_at as createdAt
+               broadcaster, status, created_at as createdAt, opportunity, over_cap as overCap
           from autoclips where created_at >= ? order by created_at asc
       `),
       // Same VOD, near the same second: the same moment, whichever copy of
@@ -207,7 +207,7 @@ export class Store {
       `),
       listAutoclips: this.db.prepare(`
         select moment_id as momentId, vod_id as vodId, offset_seconds as offsetSeconds,
-               score, funny, redone, weak, review,
+               score, funny, redone, weak, review, opportunity,
                broadcaster, caption, status, path, error,
                created_at as createdAt, finished_at as finishedAt
           from autoclips order by created_at desc limit ?
@@ -237,20 +237,33 @@ export class Store {
 
     // v2 only added a table, which `create table if not exists` above already
     // handles for old and new databases alike. Column changes go here:
+    const addColumns = (columns) => {
+      const have = new Set(this.db.prepare('pragma table_info(autoclips)').all().map((c) => c.name));
+      for (const [name, type] of columns) {
+        if (!have.has(name)) this.db.exec(`alter table autoclips add column ${name} ${type}`);
+      }
+    };
     // v3: what the engagement meter said about each automated short.
     if (current < 3) {
-      const have = new Set(this.db.prepare('pragma table_info(autoclips)').all().map((c) => c.name));
-      for (const [name, type] of [
+      addColumns([
         ['score', 'integer'],
         ['funny', 'integer'],
         ['redone', 'integer'],
         ['weak', 'integer'],
         ['review', 'text'],
-      ]) {
-        if (!have.has(name)) this.db.exec(`alter table autoclips add column ${name} ${type}`);
-      }
+      ]);
     }
-    // if (current < 4) this.db.exec('alter table moments add column ...');
+    // v4: detection's ranking of the moment when it was cut, beside the
+    // meter's score of the result — a paired record of pre-cut rank against
+    // post-cut judgement on every short, to test whether the ranking predicts
+    // anything. Also lets the hourly cap's exception (autoclip.js) know what
+    // it has to beat after a restart, and how many it has already let past.
+    if (current < 4) {
+      addColumns([
+        ['opportunity', 'real'],
+        ['over_cap', 'integer'],
+      ]);
+    }
 
     if (current !== SCHEMA_VERSION) this.db.exec(`pragma user_version = ${SCHEMA_VERSION}`);
     return SCHEMA_VERSION;
@@ -376,7 +389,17 @@ export class Store {
   }
 
   /** Claim a moment for autocollect. Returns false if it was already claimed. */
-  recordAutoclip({ momentId, vodId, offsetSeconds, broadcaster, caption, at = new Date(), dedupeSeconds = 45 }) {
+  recordAutoclip({
+    momentId,
+    vodId,
+    offsetSeconds,
+    broadcaster,
+    caption,
+    opportunity = null,
+    overCap = false,
+    at = new Date(),
+    dedupeSeconds = 45,
+  }) {
     // Checked and claimed in one locked transaction, so two copies of the app
     // cannot both decide a moment is free. Measured before this: two lirik
     // shorts six seconds apart, cut by two copies under two different ids.
@@ -397,6 +420,8 @@ export class Store {
         nul(broadcaster),
         nul(caption),
         at.toISOString(),
+        real(opportunity),
+        overCap ? 1 : 0,
       );
       this.db.exec('commit');
       return (result.changes ?? 0) > 0;

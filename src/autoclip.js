@@ -298,7 +298,7 @@ export class AutoClipper {
     if (interrupted) this.log(`autocollect: ${interrupted} cut(s) were interrupted by the last shutdown`);
     this.cuts = this.store
       .recentAutoclips({ since: this.now() - 24 * HOUR })
-      .map((row) => ({ ...row, at: Date.parse(row.createdAt) }));
+      .map((row) => ({ ...row, overCap: row.overCap === 1, at: Date.parse(row.createdAt) }));
     for (const row of this.store.listAutoclips({ limit: 80 }).reverse()) this.rememberCaption(row.caption);
     return this.cuts.length;
   }
