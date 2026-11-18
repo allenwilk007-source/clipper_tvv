@@ -74,12 +74,43 @@ const DEFAULT_WATCH = [
   'hasanabi',
 ];
 
+// Twitch category names, spelled exactly as Twitch spells them: the same
+// strings are matched against VOD chapter titles to tell, without
+// credentials, which game a moment came from.
+const DEFAULT_GAMES = ['Grand Theft Auto VI', 'Fortnite'];
+
+function games() {
+  const list = (value) =>
+    String(value)
+      .split(',')
+      .map((name) => name.trim())
+      .filter(Boolean);
+  if (process.env.GAMES !== undefined) return list(process.env.GAMES);
+  // GAME_NAME is the older one-game setting. Every .env copied from the old
+  // example says "Grand Theft Auto VI" — a default, not a choice — so only a
+  // different name narrows the list.
+  const single = (process.env.GAME_NAME || '').trim();
+  if (single && single !== 'Grand Theft Auto VI') return [single];
+  return DEFAULT_GAMES;
+}
+
+// Post-copy tags by game, keyed lowercase. SHORTS_HASHTAGS, when set,
+// replaces these for every game.
+export const GAME_HASHTAGS = {
+  'grand theft auto vi': '#gta6 #gtavi #gaming #twitch',
+  fortnite: '#fortnite #fortniteclips #gaming #twitch',
+};
+
 export const config = {
   root,
   port: num(process.env.PORT, 3000),
   clientId: process.env.TWITCH_CLIENT_ID || '',
   clientSecret: process.env.TWITCH_CLIENT_SECRET || '',
-  gameName: process.env.GAME_NAME || 'Grand Theft Auto VI',
+  // Every category the feed watches and automation clips.
+  games: games(),
+  // The first of them, for the places that still speak of one game.
+  gameName: games()[0] || 'Grand Theft Auto VI',
+  // Pins ONE category by id and overrides GAMES — kept for older setups.
   gameId: process.env.GAME_ID || '',
   clipWindowMinutes: num(process.env.CLIP_WINDOW_MINUTES, 25),
   clipPollSeconds: num(process.env.CLIP_POLL_SECONDS, 30),

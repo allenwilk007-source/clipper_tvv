@@ -235,6 +235,18 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // POST /api/shorts/<file>/reveal  -> opens the folder with the short selected
+  const reveal = /^\/api\/shorts\/([^/]+)\/reveal$/.exec(url.pathname);
+  if (reveal && req.method === 'POST') {
+    try {
+      automation.reveal(decodeURIComponent(reveal[1]));
+      sendJson(res, 200, { ok: true });
+    } catch (err) {
+      sendJson(res, 404, { error: 'not_found', message: err.message });
+    }
+    return;
+  }
+
   if (url.pathname.startsWith('/shorts/')) {
     let name = '';
     try {

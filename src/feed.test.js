@@ -253,3 +253,51 @@ describe('chat-only mode with a recording in progress', () => {
     assert.deepEqual(feed.watchChannels, ['caseoh_', 'lirik']);
   });
 });
+
+describe('the full feed with credentials', () => {
+  it('watches every configured game and tags each moment with its own', async () => {
+    const asked = { streams: [], clips: [] };
+    const clip = (id, gameId, broadcaster, offset) => ({
+      id,
+      game_id: gameId,
+      broadcaster_id: broadcaster,
+      broadcaster_name: broadcaster,
+      creator_name: `${id}-maker`,
+      video_id: `vod-${broadcaster}`,
+      vod_offset: offset,
+      duration: 30,
+      view_count: 1,
+      created_at: new Date(Date.now() - 60_000).toISOString(),
+      title: `${broadcaster} moment`,
+    });
+    const twitch = {
+      configured: true,
+      resolveGame: async (name) => ({ id: name === 'Fortnite' ? '33214' : '1234', name }),
+      liveStreams: async (gameId) => {
+        asked.streams.push(gameId);
+        return gameId === '33214'
+          ? [{ user_id: 'clix', user_login: 'clix', user_name: 'Clix', viewer_count: 9, game_name: 'Fortnite' }]
+          : [{ user_id: 'lirik', user_login: 'lirik', user_name: 'LIRIK', viewer_count: 5, game_name: 'Grand Theft Auto VI' }];
+      },
+      recentClips: async ({ gameId }) => {
+        asked.clips.push(gameId);
+        return gameId === '33214'
+          ? { clips: [clip('f1', '33214', 'clix', 500)], truncated: false }
+          : { clips: [clip('g1', '1234', 'lirik', 900)], truncated: false };
+      },
+      clipsByIds: async () => [],
+      archiveVideo: async () => null,
+    };
+    const feed = new Feed({ log: () => {}, chat: null, store: null, findArchive: null });
+    feed.twitch = twitch;
+    open = feed;
+
+    await feed.start();
+
+    assert.deepEqual(asked.streams.sort(), ['1234', '33214']);
+    assert.deepEqual(asked.clips.sort(), ['1234', '33214']);
+    assert.equal(feed.game.name, 'Grand Theft Auto VI + Fortnite');
+    const byChannel = Object.fromEntries(feed.moments.map((m) => [m.broadcaster, m.game]));
+    assert.deepEqual(byChannel, { clix: 'Fortnite', lirik: 'Grand Theft Auto VI' });
+  });
+});

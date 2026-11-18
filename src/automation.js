@@ -11,12 +11,14 @@
 // to the AutoClipper when switched on, and keeps the panel's settings in
 // data/automation.json so they survive a restart.
 
+import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, relative } from 'node:path';
 
 import { AutoClipper, autoclipConfig } from './autoclip.js';
 import { config } from './config.js';
+import { listTracks, shortformConfig } from './shortform.js';
 
 const LOGIN = /^[a-z0-9_]{1,25}$/;
 
@@ -38,8 +40,13 @@ const NOT_CHANNELS = new Set([
   'downloads',
 ]);
 
-// Each chat socket carries 18 channels; this keeps it to three.
-export const MAX_CHANNELS = 50;
+// Each chat socket carries 18 channels, so this is six sockets: plenty of
+// channels across two games without hammering Twitch's chat servers.
+export const MAX_CHANNELS = 100;
+
+// With credentials, where automation finds its moments: only the channels on
+// the list, or every live channel in the games.
+export const SCOPES = ['channels', 'category'];
 
 /** A channel login from whatever gets pasted: "xqc", "@xQc", or a twitch.tv link. */
 export function normalizeLogin(raw) {
@@ -57,6 +64,8 @@ export function sanitizeSettings(raw, fallback) {
   return {
     enabled: typeof raw?.enabled === 'boolean' ? raw.enabled : fallback.enabled,
     channels,
+    music: typeof raw?.music === 'boolean' ? raw.music : Boolean(fallback.music),
+    scope: SCOPES.includes(raw?.scope) ? raw.scope : fallback.scope || 'channels',
   };
 }
 
@@ -76,12 +85,20 @@ function saveSettings(path, settings) {
 }
 
 /** One change from the panel, applied to the settings. Throws a readable error on bad input. */
-export function applyChange(settings, { enabled, add, remove } = {}) {
-  const next = { enabled: settings.enabled, channels: [...settings.channels] };
+export function applyChange(settings, { enabled, add, remove, music, scope } = {}) {
+  const next = { ...settings, channels: [...settings.channels] };
 
   if (enabled !== undefined) {
     if (typeof enabled !== 'boolean') throw new Error('enabled must be true or false');
     next.enabled = enabled;
+  }
+  if (music !== undefined) {
+    if (typeof music !== 'boolean') throw new Error('music must be true or false');
+    next.music = music;
+  }
+  if (scope !== undefined) {
+    if (!SCOPES.includes(scope)) throw new Error(`scope must be one of ${SCOPES.join(', ')}`);
+    next.scope = scope;
   }
   if (add !== undefined) {
     const login = normalizeLogin(add);
@@ -131,11 +148,18 @@ export async function listShorts(store, dir, { limit = 24 } = {}) {
       const file = row.path ? basename(row.path) : null;
       const exists = Boolean(file && SHORT_FILE.test(file) && existsSync(join(dir, file)));
       let postText = null;
+      let post = null;
       if (exists) {
         try {
           postText = await readFile(join(dir, file.replace(/\.mp4$/, '.txt')), 'utf8');
         } catch {
           /* the video without its copy is still worth showing */
+        }
+        try {
+          // The pieces each platform button assembles in its own order.
+          post = JSON.parse(await readFile(join(dir, file.replace(/\.mp4$/, '.json')), 'utf8'));
+        } catch {
+          /* older shorts have only the .txt */
         }
       }
       return {
@@ -149,6 +173,7 @@ export async function listShorts(store, dir, { limit = 24 } = {}) {
         // Served at /shorts/<file>. Null once moved or deleted from the folder.
         file: exists ? file : null,
         postText,
+        post,
       };
     }),
   );
@@ -170,15 +195,47 @@ export class Automation {
       // re-encoding the moment it is run. AUTOCLIP=on starts it on.
       enabled: env.AUTOCLIP === 'on',
       channels: [...(feed.watchChannels || [])],
+      music: env.SHORTS_MUSIC === 'on',
+      scope: 'channels',
     });
     this.clipper = clipper || new AutoClipper({ store: feed.store, log, cfg: autoclipConfig(env) });
-    this.clipper.setChannels(this.settings.channels);
+    this.applyToClipper();
     this.timer = null;
     this.seen = null;
   }
 
   get dir() {
     return this.clipper.cfg.dir;
+  }
+
+  /**
+   * Which channels automation cuts. Chat-only can only hear the list, so the
+   * list it is; with credentials, "category" means every live channel the
+   * feed finds in the games.
+   */
+  applyToClipper() {
+    const everywhere = this.settings.scope === 'category' && this.feed.chatOnly === false;
+    this.clipper.setChannels(everywhere ? [] : this.settings.channels);
+    this.clipper.setMusic?.(this.settings.music);
+  }
+
+  /**
+   * Show a finished short in the file manager, selected, ready to drag into an
+   * upload page. Only names the renderer makes, only from the shorts folder.
+   */
+  reveal(name) {
+    if (!SHORT_FILE.test(name)) throw new Error('not a short');
+    const path = join(this.dir, name);
+    if (!existsSync(path)) throw new Error('that short is no longer in the folder');
+    const [command, args] =
+      process.platform === 'win32'
+        ? ['explorer.exe', [`/select,${path.replace(/\//g, '\\')}`]]
+        : process.platform === 'darwin'
+          ? ['open', ['-R', path]]
+          : ['xdg-open', [this.dir]];
+    // explorer.exe exits non-zero even when it worked, so the result is ignored.
+    execFile(command, args, () => {});
+    return path;
   }
 
   /** Before feed.start(): in chat-only mode these channels ARE the watch list. */
@@ -213,14 +270,15 @@ export class Automation {
     this.settings = next;
     saveSettings(this.path, next);
 
+    this.applyToClipper();
     if (channelsChanged) {
-      this.clipper.setChannels(next.channels);
       // Chat-only listens to exactly these. The full feed watches the whole
       // category, and there the list only decides what automation cuts.
       if (this.feed.chatOnly && this.feed.started) this.feed.setWatchList(next.channels);
       else this.feed.watchChannels = [...next.channels];
     }
     if (change.enabled !== undefined) this.log(`autocollect: automation ${next.enabled ? 'on' : 'off'}`);
+    if (change.music !== undefined) this.log(`autocollect: background music ${next.music ? 'on' : 'off'}`);
     return next;
   }
 
@@ -234,12 +292,18 @@ export class Automation {
   }
 
   async view() {
+    const musicDir = shortformConfig().musicDir;
     return {
       enabled: this.settings.enabled,
       mode: this.feed.chatOnly ? 'chat-only' : 'full',
+      scope: this.settings.scope,
+      games: [...config.games],
+      music: this.settings.music,
+      musicTracks: (await listTracks(musicDir)).length,
+      musicDir: relative(config.root, musicDir) || musicDir,
       channels: this.settings.channels.map((login) => ({ login, state: this.channelState(login) })),
       status: this.clipper.status(),
-      shorts: await listShorts(this.feed.store, this.dir),
+      shorts: await listShorts(this.feed.store, this.dir, { limit: 48 }),
     };
   }
 }

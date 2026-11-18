@@ -30,3 +30,7 @@ renders/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Background music: your own tracks, never committed
+music/*
+!music/README.md

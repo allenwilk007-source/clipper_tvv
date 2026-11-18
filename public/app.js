@@ -444,7 +444,98 @@ const auto = {
   status: document.getElementById('auto-status'),
   shorts: document.getElementById('shorts'),
   template: document.getElementById('short-template'),
+  games: document.getElementById('auto-games'),
+  music: document.getElementById('auto-music'),
+  musicNote: document.getElementById('auto-music-note'),
+  scopeWrap: document.getElementById('auto-scope-wrap'),
+  scope: document.getElementById('auto-scope'),
 };
+
+// ---------- posting ----------
+//
+// One click per platform: that platform's version of the text goes on the
+// clipboard, its upload page opens, and the folder opens with the file
+// selected, ready to drag in. You press post. Nothing is uploaded for you —
+// doing that needs each platform's own developer app (see the README).
+
+const joinLines = (lines) =>
+  lines
+    .filter((line) => line !== null && line !== undefined)
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+const PLATFORMS = {
+  tiktok: {
+    url: 'https://www.tiktok.com/upload',
+    text: (p) => joinLines([p.caption, '', p.credit, '', p.tags]),
+    hint: 'Caption copied and TikTok upload opened. Drag the selected file in, paste, post.',
+  },
+  youtube: {
+    url: 'https://www.youtube.com/upload',
+    // First line is the title (YouTube allows 100 characters), the rest the
+    // description. #Shorts in the title is what files a vertical video there.
+    text: (p) =>
+      joinLines([
+        `${p.caption} #Shorts`.slice(0, 100),
+        '',
+        p.credit,
+        p.link ? `Full stream: ${p.link}` : null,
+        '',
+        `${p.tags} #shorts`,
+      ]),
+    hint: 'Copied and YouTube upload opened. The first line is the title, the rest the description.',
+  },
+  instagram: {
+    url: 'https://www.instagram.com/',
+    text: (p) => joinLines([p.caption, '', p.credit, '', p.tags]),
+    hint: 'Caption copied and Instagram opened. Click Create, pick the selected file, paste.',
+  },
+};
+
+// Which platforms each short has been opened for, so the ticks survive a
+// reload. Per browser, and nothing breaks if storage is unavailable.
+function postedFor(file) {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(`posted:${file}`) || '[]'));
+  } catch {
+    return new Set();
+  }
+}
+
+function markPosted(file, platform) {
+  const done = postedFor(file);
+  done.add(platform);
+  try {
+    localStorage.setItem(`posted:${file}`, JSON.stringify([...done]));
+  } catch {
+    /* private window: the tick just will not survive a reload */
+  }
+}
+
+async function postTo(platform, item, node) {
+  const target = PLATFORMS[platform];
+  const hint = node.querySelector('.short-hint');
+  const parts = item.post || { caption: item.postText || item.caption || '', credit: '', link: '', tags: '' };
+  const text = item.post ? target.text(parts) : item.postText || item.caption || '';
+
+  // Copy while this page still has focus: opening a tab takes it away, and
+  // the clipboard refuses a page that is not focused.
+  let copied = true;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    copied = false;
+  }
+  window.open(target.url, '_blank', 'noopener');
+  fetch(`/api/shorts/${encodeURIComponent(item.file)}/reveal`, { method: 'POST' }).catch(() => {});
+
+  markPosted(item.file, platform);
+  const button = node.querySelector(`.post-btn[data-platform="${platform}"]`);
+  button.classList.add('is-done');
+  hint.textContent = copied ? target.hint : `${target.hint.split('.')[0]}. Copying failed, so use Copy post text.`;
+  hint.hidden = false;
+}
 
 // Kept between refreshes and rebuilt only when that short changed, or a video
 // someone is watching would restart every five seconds.
@@ -557,6 +648,17 @@ function buildShort(item) {
     download.remove();
   }
 
+  const post = node.querySelector('.short-post');
+  if (item.file) {
+    const done = postedFor(item.file);
+    for (const button of post.querySelectorAll('.post-btn')) {
+      if (done.has(button.dataset.platform)) button.classList.add('is-done');
+      button.addEventListener('click', () => postTo(button.dataset.platform, item, node));
+    }
+  } else {
+    post.remove();
+  }
+
   if (item.postText) {
     copy.addEventListener('click', async () => {
       try {
@@ -598,6 +700,17 @@ function renderAutomation(view) {
   auto.root.classList.toggle('is-on', view.enabled);
   auto.enabled.checked = view.enabled;
   auto.enabledLabel.textContent = view.enabled ? 'On' : 'Off';
+
+  auto.games.textContent = view.games?.length ? `Clipping ${view.games.join(' + ')}` : '';
+  auto.music.checked = Boolean(view.music);
+  auto.musicNote.textContent = !view.music
+    ? ''
+    : view.musicTracks
+      ? `${view.musicTracks} track${view.musicTracks === 1 ? '' : 's'} in ${view.musicDir}/`
+      : `no tracks yet: add royalty-free audio to ${view.musicDir}/`;
+  // Only meaningful with credentials: chat-only can only hear the list.
+  auto.scopeWrap.hidden = view.mode !== 'full';
+  if (view.scope) auto.scope.value = view.scope;
   renderChannels(view);
   auto.status.textContent = statusLine(view);
   renderShorts(view.shorts);
@@ -618,6 +731,13 @@ auto.enabled.addEventListener('change', async () => {
   const wanted = auto.enabled.checked;
   if (!(await changeAutomation({ enabled: wanted }))) auto.enabled.checked = !wanted;
 });
+
+auto.music.addEventListener('change', async () => {
+  const wanted = auto.music.checked;
+  if (!(await changeAutomation({ music: wanted }))) auto.music.checked = !wanted;
+});
+
+auto.scope.addEventListener('change', () => changeAutomation({ scope: auto.scope.value }));
 
 auto.form.addEventListener('submit', async (event) => {
   event.preventDefault();

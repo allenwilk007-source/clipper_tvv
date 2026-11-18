@@ -210,7 +210,8 @@ What lands there, measured on real runs against a live GTA stream:
 | | |
 | --- | --- |
 | video | 1080x1920 H.264, 30.0s: 25s before the reaction, 5s after |
-| look | the whole frame across the middle of a black canvas, the hook in white directly on top of the picture, the credit directly under it (`SHORTS_STYLE=blur` for a blurred fill instead) |
+| look | the whole frame across the middle of a black canvas, the title in white directly on top of the picture, word-timed subtitles directly under it, then the credit (`SHORTS_STYLE=blur` for a blurred fill instead) |
+| games | Grand Theft Auto VI and Fortnite (`GAMES`), each with its own tags; a moment from any other game is not cut |
 | audio | AAC 48 kHz, normalised toward -14 LUFS. Measured -14.6 and -15.3: single-pass loudnorm lands a little under on a 30s clip, and both platforms re-normalise anyway |
 | post copy | caption, credit, a link to the exact second in the full stream, hashtags |
 | time | about 30s from detection to finished file |
@@ -243,13 +244,14 @@ bites it is the weaker moments that miss out:
 
 | rule | default | why |
 | --- | --- | --- |
-| one of your channels | the panel's list | it clips what you added and nothing else |
+| one of your channels | the panel's list | it clips what you added and nothing else (with credentials, "every live channel in these games" lifts this) |
+| one of your games | `GAMES` | read off the VOD's chapters at the moment's own second; a moment whose game cannot be told is skipped, not guessed. The first live test without this cut World of Warcraft and tagged it #gta6 |
 | has a VOD and a position | | otherwise there is nothing to cut |
 | state | `early,fresh` | a flooded moment is already on everyone's feed |
 | settled | 30s after the window ends | measured: a live recording held full, moving footage 15s behind the live edge |
 | not stale | 20 min | by then someone else has had time to post it |
 | not already cut | 45s apart on one VOD | by position as well as id, because a chat spike later confirmed by clips comes back under a new id |
-| per poll / hour / channel | 2 / 6 / 2 | every cut is a re-encode, and a folder of one streamer is not a feed |
+| per poll / hour / channel | 4 / 30 / 6 | two renders run at once at about 30s each, so 30 an hour leaves room; the per-channel cap keeps one hot streamer from being the whole folder |
 | minimum score | 0 | deliberately off: nothing has calibrated the opportunity scale yet, and `npm run eval` should set this, not a guess |
 
 What has been cut is kept in the store, so a restart does not cut the same
@@ -258,30 +260,80 @@ retried. The short is written next to its source and moved into
 `clips/ready/` only when complete, so a stopped process cannot leave a broken
 file in the folder you post from.
 
-### The caption
+### Titles, subtitles and emoji
 
-A clip title is a person describing that exact moment, so it wins when there
-is one. A chat-only moment has only the stream title, which describes the
-whole broadcast, so there the caption says what chat was doing, and only when
-that class actually spiked: `Chat said clip it`, `Chat lost it`, `Wait what`,
-`Let's go`, `Oh no`. Sentence case, as the reference reel writes its hook: it
-reads as a person talking rather than a banner. Stream-title furniture (`| !merch [DROPS ON]`) is
-stripped.
+Every short is transcribed first (faster-whisper, `base.en`, on the CPU: a
+30s cut takes about 3s), and that transcript drives two things.
 
-Three traps in burning text into video, each hit for real while building this
-and each pinned by a test in `src/shortform.test.js`:
+**The title says what happened**, from the best source there is:
 
-- **A `%` kills the render.** drawtext expands `%{...}`, and with expansion on,
-  a plain `100%` in a title fails the whole encode. Captions go in through a
-  file, with `expansion=none`.
-- **The drive letter splits the font path.** The `:` in `C:/Windows/...` is the
-  option separator in a filtergraph, so the path needs escaping at two levels.
-- **Emoji and non-Latin text print as boxes.** Captions are limited to what the
-  font can draw; a title with nothing drawable left falls back to the chat hook
-  or the streamer's name.
+1. a clip title a person wrote about this moment, when there is one;
+2. otherwise **what was said as it happened**: the line nearest to just before
+   people reacted, preferring lines that end in `!` or `?` and never one that
+   is only filler: `"My god, cops coming" 👀`, `"It was self-defense" 🔥`,
+   `"Are you crazy?" 😳`;
+3. otherwise what chat did: `Chat lost it 😂`, `Wait what 😳`, with several
+   wordings per reaction.
 
-`SHORTS_FONT` takes any `.ttf`. The default on Windows is Segoe UI Bold for
-the reel look and Segoe UI Black for the blur look.
+The emoji follows the reaction that spiked (laughing 😂 💀 🤣, shock 😳 😱,
+hype 🔥, tension 😬, "clip it" 🎬). Titles are not repeated: the last 80 are
+remembered, across restarts, and the next one is chosen to differ.
+
+Two honest limits. Whisper hears everything, so in GTA the quoted line can be
+an NPC rather than the streamer, and it sometimes mishears ("fours of horizon
+six" for what was probably Forza Horizon). And the model is English-only: on
+other languages it does not refuse, it invents fluent English. Measured mean
+word confidence: five English streamers 0.70 to 0.82; Spanish 0.50, German
+0.45, another 0.26 over 79 invented words. Below 0.6 a short keeps its chat
+title but gets **no subtitles and no quote**, rather than a confident
+mistranslation burned into it.
+
+**Subtitles** sit directly under the picture, one to three words at a time,
+with the word being said in yellow. Under the picture, they cover neither the
+game's HUD nor the platform's description overlay.
+
+On-screen emoji are drawn as clean white outlines: neither of ffmpeg's text
+renderers here can draw colour emoji. The post copy carries the colour ones,
+which TikTok and Instagram render themselves.
+
+Slurs are always masked. Ordinary swearing is masked too (`s***`), because a
+burned-in swear gets a short shown to fewer people; `SHORTS_CENSOR=off` keeps
+it.
+
+All on-screen text goes through one subtitle file rendered by libass rather
+than drawtext. drawtext cannot fall back from one font to another, so a title
+with an emoji in it lost either the emoji or the letters. Each trap hit while
+building this is pinned by a test in `src/shortform.test.js`: the drive-letter
+colon that splits a font path, `{` and `\` meaning something to libass, and
+scripts the font has no glyphs for.
+
+### Background music
+
+Optional and **off** by default: switch **Background music** on in the panel
+and drop tracks into `music/` (see `music/README.md`). Each short gets one,
+started partway in, at about -18 dB under the stream, ducking further whenever
+someone talks, with a fade in and out. Use music you have the right to post:
+copyrighted songs get shorts muted or struck.
+
+### Posting
+
+Each finished short in the panel has **TikTok**, **YouTube** and **Instagram**
+buttons. A click copies that platform's version of the post (YouTube's has
+`#Shorts` in the title line), opens its upload page, and opens the folder with
+the file selected, ready to drag in. You press post. The panel ticks the
+platforms you have opened each short for.
+
+Posting **for** you, on a schedule, needs each platform's official API and a
+developer app of your own on each, which only you can register:
+
+| platform | what it takes | catch |
+| --- | --- | --- |
+| YouTube | a Google Cloud project with the YouTube Data API, an OAuth client, and your channel signed in once | uploads from an unaudited project stay **private** until Google audits it |
+| TikTok | a TikTok for Developers app with the Content Posting API | direct posts from an unaudited app are **private-only**; uploading to your TikTok inbox to finish in the app is the usual route meanwhile |
+| Instagram | a Meta developer app, and an Instagram **professional** (Business or Creator) account linked to a Facebook Page | publishing works for your own account while the app is in development mode |
+
+None of that is built yet: it can only be built and tested against your own
+accounts.
 
 ## Detection: being first, and proving it
 
@@ -509,7 +561,8 @@ src/clipjobs.js in-memory clip queue, two at a time
 src/shortform.js caption, 9:16 render with text, post copy
 src/autoclip.js which moments to cut, and cutting them
 src/automation.js channel automation: the panel's channels, switch, shorts
-src/archive.js  where a live channel is recording, without credentials
+src/archive.js  where a live channel is recording, and its game, without credentials
+src/transcribe.py speech to timed words (faster-whisper), for subtitles and titles
 src/auto.js     npm run auto: channel automation, headless
 src/server.js   HTTP + static
 src/demo.js     fixture, pushed through the real pipeline

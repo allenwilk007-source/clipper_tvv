@@ -109,6 +109,11 @@ function pump() {
             output: join(job.short.dir, `${basename(result.path, extname(result.path))}.mp4`),
             moment: job.short.moment,
             start: result.start,
+            // Seconds into the cut where people reacted: the title's quote is
+            // looked for just before it.
+            reactionAt: result.offsetSeconds - result.start,
+            avoid: job.short.avoid || [],
+            music: Boolean(job.short.music),
             onProgress: ({ seconds, message }) => {
               if (Number.isFinite(seconds) && job.expectedSeconds > 0) {
                 job.progress = Math.min(99, Math.round((seconds / job.expectedSeconds) * 100));
@@ -119,6 +124,9 @@ function pump() {
           job.shortPath = made.path;
           job.textPath = made.textPath;
           job.caption = made.caption;
+          job.words = made.words;
+          job.speechError = made.speechError;
+          job.track = made.track;
           // The landscape cut was only ever an intermediate for this job.
           if (!job.short.keepSource) {
             await rm(result.path, { force: true });

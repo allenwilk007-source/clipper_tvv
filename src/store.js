@@ -164,8 +164,12 @@ export class Store {
         values (?, ?, ?, ?, ?, 'queued', ?)
         on conflict(moment_id) do nothing
       `),
+      // The caption is final only after the render: it can quote what was
+      // said, which is not known until the cut has been transcribed.
       finishAutoclip: this.db.prepare(`
-        update autoclips set status = ?, path = ?, error = ?, finished_at = ? where moment_id = ?
+        update autoclips set status = ?, path = ?, error = ?, finished_at = ?,
+               caption = coalesce(?, caption)
+         where moment_id = ?
       `),
       recentAutoclips: this.db.prepare(`
         select moment_id as momentId, vod_id as vodId, offset_seconds as offsetSeconds,
@@ -248,7 +252,7 @@ export class Store {
       for (const moment of moments) {
         this.q.insertMoment.run(
           moment.id,
-          nul(gameId),
+          nul(moment.gameId ?? gameId),
           nul(moment.broadcasterId),
           nul(moment.broadcaster),
           nul(moment.vodId),
@@ -341,8 +345,8 @@ export class Store {
     return (result.changes ?? 0) > 0;
   }
 
-  finishAutoclip(momentId, { status, path = null, error = null, at = new Date() }) {
-    this.q.finishAutoclip.run(status, nul(path), nul(error), at.toISOString(), momentId);
+  finishAutoclip(momentId, { status, path = null, error = null, caption = null, at = new Date() }) {
+    this.q.finishAutoclip.run(status, nul(path), nul(error), at.toISOString(), nul(caption), momentId);
   }
 
   /** Newest first: what the automation panel lists. */

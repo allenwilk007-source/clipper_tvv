@@ -10,7 +10,20 @@ import { AutoClipper, autoclipConfig, cutOffset, momentLogin, selectForAutoclip 
 import { Store } from './store.js';
 
 const NOW = Date.parse('2026-11-19T21:00:00Z');
-const cfg = { ...autoclipConfig({}), pre: 25, post: 5, workDir: 'work', dir: 'ready' };
+// Caps pinned here rather than read from the defaults, so raising a default
+// cannot quietly weaken what these tests check. No game filter unless a test
+// asks for one.
+const cfg = {
+  ...autoclipConfig({}),
+  games: [],
+  perHour: 6,
+  perChannelPerHour: 2,
+  maxPerPoll: 2,
+  pre: 25,
+  post: 5,
+  workDir: 'work',
+  dir: 'ready',
+};
 
 const moment = (over = {}) => ({
   id: 'm1',
@@ -138,17 +151,33 @@ test('a cut is queued as a short, claimed in the store, and settled', async () =
   assert.equal(job.short.dir, 'ready');
   assert.equal(job.short.auto, true);
   assert.equal(job.short.moment.title, 'he drove off the pier');
+  assert.equal(job.short.music, false);
+  // The render is told which titles not to repeat, this one's included.
+  assert.ok(job.short.avoid.some((title) => title.startsWith('he drove off the pier')));
 
   let [row] = store.all('select status, caption from autoclips');
   assert.equal(row.status, 'queued');
-  assert.equal(row.caption, 'he drove off the pier');
+  // Provisional, with an emoji: the clip title, before anything was transcribed.
+  assert.match(row.caption, /^he drove off the pier \p{Extended_Pictographic}$/u);
 
-  job.onSettled({ state: 'done', shortPath: 'ready/x.mp4', message: 'short ready' });
-  [row] = store.all('select status, path from autoclips');
+  // The render returns the final title, shaped by what was said.
+  job.onSettled({ state: 'done', shortPath: 'ready/x.mp4', message: 'short ready', caption: '"Bye bye car" 😂' });
+  [row] = store.all('select status, path, caption from autoclips');
   assert.equal(row.status, 'done');
   assert.equal(row.path, 'ready/x.mp4');
+  assert.equal(row.caption, '"Bye bye car" 😂');
   assert.equal(auto.status().done, 1);
+  // And it will not be used again.
+  assert.ok(auto.recentCaptions.includes('"Bye bye car" 😂'));
   store.close();
+});
+
+test('background music follows the switch, for shorts queued after it', async () => {
+  const { calls, enqueue } = recorder();
+  const auto = new AutoClipper({ enqueue, now: () => NOW, cfg });
+  auto.setMusic(true);
+  await auto.onPoll([moment()]);
+  assert.equal(calls[0].short.music, true);
 });
 
 test('a restart remembers what was cut, and does not cut it again', async () => {
@@ -211,4 +240,36 @@ test('the channel list can be changed while running', async () => {
   auto.setChannels(['xqc']);
   await auto.onPoll([moment()]);
   assert.equal(calls.length, 1);
+});
+
+// --- games -------------------------------------------------------------------
+
+test('only the configured games are clipped, whatever the channel', () => {
+  const games = { games: ['Grand Theft Auto VI', 'Fortnite'] };
+  const { picks, skipped } = select(
+    [
+      moment({ id: 'gta', game: 'Grand Theft Auto VI' }),
+      moment({ id: 'fn', broadcaster: 'clix', vodId: 'v2', game: 'fortnite' }),
+      // The first live test cut this one and tagged it #gta6.
+      moment({ id: 'wow', broadcaster: 'sodapoppin', vodId: 'v3', game: 'World of Warcraft' }),
+    ],
+    [],
+    { ...games, maxPerPoll: 5 },
+  );
+  assert.deepEqual(picks.map((m) => m.id).sort(), ['fn', 'gta']);
+  assert.equal(skipped['other-game'], 1);
+});
+
+test('a moment whose game cannot be told is skipped, not guessed', () => {
+  const { picks, skipped } = select([moment({ game: null })], [], { games: ['Fortnite'] });
+  assert.deepEqual(picks, []);
+  assert.equal(skipped['unknown-game'], 1);
+});
+
+test('the defaults now allow far more shorts an hour', () => {
+  const defaults = autoclipConfig({});
+  assert.equal(defaults.perHour, 30);
+  assert.equal(defaults.perChannelPerHour, 6);
+  assert.equal(defaults.maxPerPoll, 4);
+  assert.deepEqual(defaults.games, ['Grand Theft Auto VI', 'Fortnite']);
 });

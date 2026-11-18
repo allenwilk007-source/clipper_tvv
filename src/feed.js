@@ -42,6 +42,7 @@ export class Feed {
       store !== undefined ? store : config.storeEnabled ? openStore(config.storePath, { log }) : null;
 
     this.game = null;
+    this.games = [];
     this.moments = [];
     this.streams = new Map();
     this.previousSaturation = new Map();
@@ -78,15 +79,33 @@ export class Feed {
   async init() {
     if (this.game) return this.game;
     if (this.chatOnly) {
-      // No category to resolve: the watch list IS the scope.
+      // No category to resolve: the watch list IS the scope. Which game each
+      // moment came from is read off the recording's chapters instead.
+      this.games = config.games.map((name) => ({ id: null, name }));
       this.game = { id: null, name: `${this.watchChannels.length} watched channels` };
       this.log(`no credentials — chat-only on ${this.watchChannels.length} channels`);
       return this.game;
     }
-    this.game = config.gameId
-      ? await this.twitch.gameById(config.gameId)
-      : await this.twitch.resolveGame(config.gameName);
-    this.log(`watching "${this.game.name}" (id ${this.game.id})`);
+
+    if (config.gameId) {
+      this.games = [await this.twitch.gameById(config.gameId)];
+    } else {
+      this.games = [];
+      for (const name of config.games) {
+        try {
+          this.games.push(await this.twitch.resolveGame(name));
+        } catch (err) {
+          // One misspelled category should not take the others down with it.
+          this.log(`could not find the "${name}" category: ${err.message}`);
+        }
+      }
+      if (!this.games.length) throw new Error(`none of ${config.games.join(', ')} is a Twitch category`);
+    }
+    this.game = {
+      id: this.games.map((game) => game.id).join(','),
+      name: this.games.map((game) => game.name).join(' + '),
+    };
+    this.log(`watching ${this.games.map((game) => `"${game.name}" (id ${game.id})`).join(', ')}`);
     return this.game;
   }
 
@@ -116,6 +135,7 @@ export class Feed {
         title: '',
         viewers: null,
         vodId: known?.vodId ?? null,
+        chapters: known?.chapters ?? null,
         archiveCheckedAt: known?.archiveCheckedAt ?? null,
       });
     }
@@ -192,7 +212,9 @@ export class Feed {
     for (const login of new Set(candidates.map((candidate) => candidate.login))) {
       const channel = this.channels.get(login);
       if (!channel) continue;
-      const ttl = channel.vodId ? 30 * 60_000 : 10 * 60_000;
+      // Re-checked every five minutes while recording, because the chapters
+      // say which game is on and a streamer can switch; every ten when not.
+      const ttl = channel.vodId ? 5 * 60_000 : 10 * 60_000;
       if (channel.archiveCheckedAt && now - channel.archiveCheckedAt < ttl) continue;
       if (lookups >= 3) break;
       lookups += 1;
@@ -207,6 +229,7 @@ export class Feed {
       const before = channel.vodId;
       channel.vodId = archive?.vodId || null;
       channel.startedAt = archive ? new Date(archive.startedAt).toISOString() : null;
+      channel.chapters = archive?.chapters || null;
       if (channel.vodId !== before) {
         this.log(
           archive
@@ -218,7 +241,10 @@ export class Feed {
   }
 
   async pollStreams() {
-    const streams = await this.twitch.liveStreams(this.game.id, 100);
+    // Every game, merged and ranked by viewers, so the chat budget goes to the
+    // biggest channels across all of them rather than all of the first game.
+    const perGame = await Promise.all(this.games.map((game) => this.twitch.liveStreams(game.id, 100)));
+    const streams = perGame.flat().sort((a, b) => (b.viewer_count || 0) - (a.viewer_count || 0));
     this.streams = new Map(streams.map((s) => [s.user_id, s]));
     this.lastStreamPoll = new Date().toISOString();
 
@@ -235,6 +261,7 @@ export class Feed {
         startedAt: stream.started_at,
         title: stream.title,
         viewers: stream.viewer_count,
+        game: stream.game_name || null,
         vodId: known?.startedAt === stream.started_at ? known.vodId : null,
       });
     }
@@ -256,14 +283,24 @@ export class Feed {
     const now = Date.now();
     const startedAt = new Date(now - config.clipWindowMinutes * 60_000).toISOString();
 
-    const { clips, truncated } = await this.twitch.recentClips({
-      gameId: this.game.id,
-      startedAt,
-      endedAt: new Date(now).toISOString(),
-      maxPages: config.clipMaxPages,
-    });
+    const perGame = await Promise.all(
+      this.games.map((game) =>
+        this.twitch.recentClips({
+          gameId: game.id,
+          startedAt,
+          endedAt: new Date(now).toISOString(),
+          maxPages: config.clipMaxPages,
+        }),
+      ),
+    );
+    const clips = perGame.flatMap((result) => result.clips);
+    const truncated = perGame.some((result) => result.truncated);
 
+    // A clip carries its category id; the moment carries the game's name, so
+    // automation and the post copy can tell GTA from Fortnite.
+    const names = new Map(this.games.map((game) => [String(game.id), game.name]));
     const clustered = clusterClips(clips, { gapSeconds: config.clusterGapSeconds });
+    for (const moment of clustered) moment.game = names.get(String(moment.gameId)) || null;
 
     // Chat spikes that nothing has been clipped from yet. These are the only
     // rows in the feed that can beat the crowd rather than merely keep up with
@@ -301,7 +338,7 @@ export class Feed {
         this.store.recordPoll({
           moments: scored,
           clipsById: new Map(clips.map((clip) => [clip.id, clip])),
-          gameId: this.game?.id || null,
+          gameId: null, // each moment carries its own
           at: new Date(now),
         });
       } catch (err) {
