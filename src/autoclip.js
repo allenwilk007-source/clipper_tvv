@@ -304,7 +304,9 @@ export class AutoClipper {
         path: job.shortPath,
         error: ok ? null : job.message,
         caption: ok ? job.caption : null,
-        review: job.review || null,
+        review: job.review
+          ? { ...job.review, audioZ: moment.audioZ ?? null, window: windowFor(moment, this.cfg).source }
+          : null,
       });
     } catch (err) {
       this.log(`autocollect: could not record the result for ${moment.id}: ${err.message}`);

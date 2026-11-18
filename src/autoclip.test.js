@@ -330,3 +330,15 @@ test('automation cuts an audio-timed moment with the audio window', async () => 
   assert.equal(calls[0].pre, 22);
   assert.equal(calls[0].post, 8);
 });
+
+test('each short records the audio confidence and which window cut it', async () => {
+  const store = new Store(':memory:');
+  const { calls, enqueue } = recorder();
+  const auto = new AutoClipper({ store, enqueue, now: () => NOW, cfg });
+  await auto.onPoll([moment({ audioOffsetSeconds: 1023, audioZ: 5.5, reactionOffsetSeconds: 1023 })]);
+  calls[0].onSettled({ state: 'done', shortPath: 'ready/a.mp4', caption: 'x', review: { score: 61, funny: 30, reasons: [] } });
+  const review = JSON.parse(store.listAutoclips()[0].review);
+  assert.equal(review.audioZ, 5.5);
+  assert.equal(review.window, 'audio');
+  store.close();
+});

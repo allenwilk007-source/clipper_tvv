@@ -398,7 +398,18 @@ export class Store {
       int(review?.funny),
       review ? (review.redone ? 1 : 0) : null,
       review ? (review.weak ? 1 : 0) : null,
-      review ? JSON.stringify({ reasons: review.reasons || [], parts: review.parts || null, before: review.before ?? null }) : null,
+      review
+        ? JSON.stringify({
+            reasons: review.reasons || [],
+            parts: review.parts || null,
+            before: review.before ?? null,
+            // Kept so detection's audio confidence can be checked against how
+            // the cut actually scored: does a confident audio offset clear the
+            // redo line more often than a chat-timed one?
+            audioZ: review.audioZ ?? null,
+            window: review.window ?? null,
+          })
+        : null,
       momentId,
     );
   }
