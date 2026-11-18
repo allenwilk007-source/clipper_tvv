@@ -22,6 +22,24 @@ const defaultLog = (message) => console.log(`[${stamp()}] ${message}`);
  * live channels every couple of minutes because the top of a category barely
  * moves and each refresh costs several requests.
  */
+// Lookups that will never succeed by asking again.
+export const PERMANENT_LOOKUP = /subscriber-only|logged into an account|does not exist|HTTP Error 404/i;
+
+/** 30s, 60s, 2m, 4m, then every 5m: soon at first, never a storm. */
+export const retryDelay = (failures) => Math.min(5 * 60_000, 30_000 * 2 ** Math.max(0, failures - 1));
+
+/**
+ * When a channel's recording should next be looked up. A retry after a
+ * failure takes precedence; otherwise every five minutes while recording
+ * (the chapters say which game is on, and a streamer can switch) and every
+ * ten when not.
+ */
+export function lookupDueAt(channel) {
+  if (channel.retryAt) return channel.retryAt;
+  if (!channel.archiveCheckedAt) return 0;
+  return channel.archiveCheckedAt + (channel.vodId ? 5 * 60_000 : 10 * 60_000);
+}
+
 export class Feed {
   /**
    * `chat` and `watchChannels` exist to be injected. The chat watcher opens
@@ -33,6 +51,9 @@ export class Feed {
     // Where a watched channel is recording, found without credentials. Tests
     // inject a stand-in, since the real one runs yt-dlp against Twitch.
     this.findArchive = findArchive !== undefined ? findArchive : findLiveArchive;
+    // How recording lookups are going, so a collector that has stopped being
+    // able to place anything says so instead of looking healthy.
+    this.lookups = { failures: 0, consecutive: 0, lastError: null, lastErrorAt: null, lastOkAt: null };
     this.twitch = new Twitch({ log });
     this.chat =
       chat !== undefined ? chat : config.chatEnabled ? new ChatWatcher({ log }) : null;
@@ -143,6 +164,9 @@ export class Feed {
         vodId: known?.vodId ?? null,
         chapters: known?.chapters ?? null,
         archiveCheckedAt: known?.archiveCheckedAt ?? null,
+        retryAt: known?.retryAt ?? null,
+        lookupFailures: known?.lookupFailures ?? 0,
+        lookupError: known?.lookupError ?? null,
       });
     }
     this.channels = next;
@@ -220,20 +244,48 @@ export class Feed {
     for (const login of new Set(candidates.map((candidate) => candidate.login))) {
       const channel = this.channels.get(login);
       if (!channel) continue;
-      // Re-checked every five minutes while recording, because the chapters
-      // say which game is on and a streamer can switch; every ten when not.
-      const ttl = channel.vodId ? 5 * 60_000 : 10 * 60_000;
-      if (channel.archiveCheckedAt && now - channel.archiveCheckedAt < ttl) continue;
+      if (now < lookupDueAt(channel)) continue;
       if (lookups >= 3) break;
       lookups += 1;
-      channel.archiveCheckedAt = now;
 
       let archive = null;
+      let error = null;
       try {
         archive = await this.findArchive(login);
       } catch (err) {
-        this.log(`recording lookup failed for ${login}: ${String(err.message).split(/\r?\n/)[0]}`);
+        error = String(err.message).split(/\r?\n/)[0];
       }
+
+      // A failed lookup says nothing about whether the channel is recording.
+      // Treating it as "not recording" used to wipe a channel's known VOD and
+      // chapters on one transient error, so its moments lost their game and
+      // were all skipped — and with a lookup failing on every poll, a whole
+      // collector went inert for 35 minutes while its log looked healthy.
+      // So keep what was known, and ask again soon, backing off.
+      if (error && !PERMANENT_LOOKUP.test(error)) {
+        channel.lookupFailures = (channel.lookupFailures || 0) + 1;
+        channel.lookupError = error;
+        channel.retryAt = now + retryDelay(channel.lookupFailures);
+        this.lookups.failures += 1;
+        this.lookups.consecutive += 1;
+        this.lookups.lastError = error;
+        this.lookups.lastErrorAt = new Date(now).toISOString();
+        this.log(
+          `recording lookup failed for ${login} (${channel.lookupFailures} in a row, again in ` +
+            `${Math.round(retryDelay(channel.lookupFailures) / 1000)}s): ${error}`,
+        );
+        continue;
+      }
+
+      // An answer, even "nothing to cut": this channel's lookup is healthy.
+      this.lookups.consecutive = 0;
+      this.lookups.lastOkAt = new Date(now).toISOString();
+      channel.lookupFailures = 0;
+      channel.retryAt = null;
+      channel.archiveCheckedAt = now;
+      // A subscriber-only VOD is an answer too: it cannot be cut without a
+      // login, so it is noted once rather than retried every few seconds.
+      channel.lookupError = error;
       const before = channel.vodId;
       channel.vodId = archive?.vodId || null;
       channel.startedAt = archive ? new Date(archive.startedAt).toISOString() : null;
@@ -242,7 +294,9 @@ export class Feed {
         this.log(
           archive
             ? `${login} is recording to ${archive.vodId} — its moments can be cut`
-            : `${login} has no recording in progress — its moments can be watched, not cut`,
+            : error
+              ? `${login}'s recording cannot be cut (${error.slice(0, 60)}) — its moments can be watched, not cut`
+              : `${login} has no recording in progress — its moments can be watched, not cut`,
         );
       }
     }

@@ -192,6 +192,39 @@ export async function listShorts(store, dir, { limit = 24 } = {}) {
   );
 }
 
+/**
+ * Whether the collector is actually able to cut anything.
+ *
+ * Measured: after a burst of failed lookups a collector logged the same
+ * "passed over: unknown-game 10" line every ten minutes for 35 minutes and
+ * cut nothing, and that line reads the same whether one moment was skipped
+ * or all of them. So this says plainly when most of a poll was skipped for
+ * want of a game, and louder when recording lookups keep failing outright.
+ */
+export function collectorHealth({ skipped = {}, picks = 0, lookups = {} } = {}) {
+  const passed = Object.values(skipped).reduce((n, v) => n + v, 0);
+  const considered = passed + picks;
+  const unknown = skipped['unknown-game'] || 0;
+  const failing = lookups.consecutive || 0;
+  if (failing >= 5) {
+    return {
+      level: 'error',
+      message:
+        `recording lookups have failed ${failing} times in a row (last: ${String(lookups.lastError).slice(0, 90)}), ` +
+        'so new moments cannot be placed or cut. If it does not clear within a few minutes, restart the app.',
+    };
+  }
+  if (considered >= 3 && unknown / considered >= 0.6) {
+    return {
+      level: 'warn',
+      message:
+        `${unknown} of ${considered} moments were passed over because their game could not be told` +
+        (failing ? `; recording lookups are failing (${String(lookups.lastError).slice(0, 90)})` : ''),
+    };
+  }
+  return { level: 'ok', message: null };
+}
+
 export class Automation {
   constructor({
     feed,
@@ -215,6 +248,26 @@ export class Automation {
     this.applyToClipper();
     this.timer = null;
     this.seen = null;
+    this.health = { level: 'ok', message: null };
+    this.healthLoggedAt = 0;
+  }
+
+  /** Re-read health after a poll; log on a change, and every 5 min while bad. */
+  checkHealth(now = Date.now()) {
+    const next = collectorHealth({
+      skipped: this.clipper.lastSkipped,
+      picks: this.clipper.lastPicks || 0,
+      lookups: this.feed.lookups || {},
+    });
+    const changed = next.level !== this.health.level;
+    if (next.level !== 'ok' && (changed || now - this.healthLoggedAt > 5 * 60_000)) {
+      this.log(`autocollect: WARNING ${next.message}`);
+      this.healthLoggedAt = now;
+    } else if (next.level === 'ok' && changed) {
+      this.log('autocollect: recovered — moments are being placed and cut again');
+    }
+    this.health = next;
+    return next;
   }
 
   get dir() {
@@ -267,6 +320,7 @@ export class Automation {
       if (!this.settings.enabled) return;
       this.clipper
         .onPoll(moments)
+        .then(() => this.checkHealth())
         .catch((err) => this.log(`autocollect: poll failed: ${err.message}`));
     }, 2000);
     this.timer.unref?.();
@@ -316,6 +370,8 @@ export class Automation {
       musicDir: relative(config.root, musicDir) || musicDir,
       channels: this.settings.channels.map((login) => ({ login, state: this.channelState(login) })),
       status: this.clipper.status(),
+      health: this.health,
+      lookups: this.feed.lookups || null,
       shorts: await listShorts(this.feed.store, this.dir, { limit: 48 }),
     };
   }
