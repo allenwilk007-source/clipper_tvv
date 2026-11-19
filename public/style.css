@@ -819,6 +819,22 @@ select {
   font-size: 13px;
 }
 
+.bar-links {
+  display: flex;
+  gap: 14px;
+  margin-left: 16px;
+  font-size: 13px;
+}
+
+.bar-links a {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.bar-links a:hover {
+  color: var(--text);
+}
+
 .uploads-title {
   display: block;
   margin-bottom: 8px;

@@ -1,0 +1,87 @@
+/* The upload queue. Layout only; tokens come from style.css and the platform
+   frame from stats.css. */
+
+.queue-caveat {
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.queue-summary {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.queue-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.queue-day {
+  margin: 14px 0 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.queue-day:first-child {
+  margin-top: 0;
+}
+
+.queue-row {
+  display: grid;
+  /* time, score, title, who — the title takes whatever is left. */
+  grid-template-columns: 62px 34px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: baseline;
+  padding: 7px 0;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.queue-time {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.queue-score {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.queue-title {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+
+.queue-who {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.pending-note.is-held {
+  color: var(--danger);
+}
+
+@media (max-width: 560px) {
+  .queue-row {
+    /* The broadcaster drops under the title rather than squeezing it. */
+    grid-template-columns: 58px 30px minmax(0, 1fr);
+  }
+
+  .queue-who {
+    grid-column: 3;
+  }
+}

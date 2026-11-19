@@ -67,6 +67,9 @@ export const uploadConfig = (env = process.env) => ({
 
 export const MODES = ['off', 'dry-run', 'on'];
 
+// How long a read of the queue may be reused. See Uploader#queueCache.
+const QUEUE_TTL_MS = 5_000;
+
 /**
  * Midnight in Pacific time at or before `now`: when YouTube's quota resets.
  * A calendar day, not a rolling 24 hours.
@@ -163,6 +166,48 @@ export function tiktokPost(candidate, { avoid = [] } = {}) {
   return { title, caption, link: parts.link || null };
 }
 
+/**
+ * When the next `count` uploads would go, if nothing changes.
+ *
+ * A projection, not a promise. A better short landing, a refusal, the owner
+ * switching a platform off, or a cap reached early all move it. What it is
+ * careful about is using the SAME cap and spacing rules the uploader applies,
+ * rather than a second set of them that could quietly drift.
+ *
+ * `taken` is every attempt already spent, as millisecond timestamps.
+ */
+export function projectSlots({ taken = [], count, now, perDay, spacingMinutes, rolling, notBefore = 0 }) {
+  // Blocked with no end (a lapsed sign-in, a refused account): there is no
+  // honest time to show, and inventing one would be worse than a blank.
+  if (!Number.isFinite(notBefore) || count <= 0) return [];
+  const spacing = spacingMinutes * 60_000;
+  const spent = [...taken].filter(Number.isFinite).sort((a, b) => a - b);
+
+  const windowed = (at) =>
+    rolling ? spent.filter((t) => t > at - tiktok.CAP_WINDOW_MS && t <= at) : spent.filter((t) => pacificDayStart(t) === pacificDayStart(at));
+
+  const out = [];
+  let last = spent.length ? spent[spent.length - 1] : Number.NEGATIVE_INFINITY;
+  for (let i = 0; i < count; i += 1) {
+    let at = Math.max(now, notBefore, last + spacing);
+    // Walk forward until the cap has room. Each step strictly increases the
+    // time, so this ends.
+    for (let guard = 0; guard < 500; guard += 1) {
+      const used = windowed(at);
+      if (used.length < perDay) break;
+      // Rolling: room appears as the oldest attempt ages out of the window.
+      // Calendar: not until the next Pacific midnight.
+      at = rolling ? used[0] + tiktok.CAP_WINDOW_MS : pacificDayStart(pacificDayStart(at) + 26 * 3600_000);
+      at = Math.max(at, last + spacing);
+    }
+    out.push(at);
+    spent.push(at);
+    spent.sort((a, b) => a - b);
+    last = at;
+  }
+  return out;
+}
+
 export class Uploader {
   constructor({
     store,
@@ -191,6 +236,13 @@ export class Uploader {
     }
     this.busy = false;
     this.timer = null;
+    // candidates() opens a .json for every short in the queue, and the queue
+    // only grows — 172 of them at the time of writing, read twice over for a
+    // view, by two pages that both poll. The scan is cached for a few seconds:
+    // long enough to collapse a burst of polls, short enough that a short
+    // rendered just now appears while the owner is still looking at the page.
+    // Wall-clock, not the injected one: this is about IO rate, not schedule.
+    this.queueCache = new Map();
 
     // Everything platform-specific, in one place, so the scheduling and the
     // checks above it are written once.
@@ -238,6 +290,15 @@ export class Uploader {
         },
       },
     };
+  }
+
+  /** The queue for a platform, read at most once every few seconds. */
+  async queueFor(key) {
+    const hit = this.queueCache.get(key);
+    if (hit && Date.now() - hit.at < QUEUE_TTL_MS) return hit.rows;
+    const rows = await candidates({ store: this.store, dir: this.dir, platform: key });
+    this.queueCache.set(key, { at: Date.now(), rows });
+    return rows;
   }
 
   adapter(platform) {
@@ -348,7 +409,10 @@ export class Uploader {
         const mode = this.settings[platform].mode;
         if (mode === 'off') continue;
         if (this.schedule(platform, mode).nextAt > this.now()) continue;
+        // postOne reads the queue itself, uncached, and writes to it. Whatever
+        // it did, the cached copy is now out of date.
         const result = await this.postOne(platform, mode);
+        this.queueCache.clear();
         if (result) return result;
       }
       return null;
@@ -463,12 +527,54 @@ export class Uploader {
     Object.assign(this.state[platform], { connected: true, blockedUntil: 0, blockedReason: null, lastError: null });
   }
 
+  /**
+   * The queued shorts with the time each would go out, best first.
+   *
+   * The times are a projection (see projectSlots): what the queue looks like
+   * if nothing changes. Worth showing anyway — "5 of 5 today" says nothing
+   * about whether the next one is in twenty minutes or tomorrow afternoon.
+   */
+  upcoming(platform, queue, limit = 12) {
+    if (!this.store || !queue.length) return [];
+    const cfg = this.cfg[platform];
+    const now = this.now();
+    const key = this.platformKey(platform, this.settings[platform].mode);
+    const wanted = queue.slice(0, limit);
+    // Two days back: enough for the rolling window and for the spacing owed
+    // to an upload that went out just before midnight.
+    const taken = this.store
+      .uploadsSince(key, now - 48 * 3600_000)
+      .filter((r) => SPENT.has(r.status))
+      .map((r) => Date.parse(r.started_at))
+      .filter(Number.isFinite);
+    const slots = projectSlots({
+      taken,
+      count: wanted.length,
+      now,
+      perDay: cfg.perDay,
+      spacingMinutes: cfg.spacingMinutes,
+      rolling: this.adapter(platform).window === 'rolling-24h',
+      notBefore: this.state[platform].blockedUntil,
+    });
+    return wanted.map((c, i) => ({
+      file: c.file,
+      score: c.score,
+      broadcaster: c.saved.broadcaster || null,
+      game: c.saved.game || null,
+      title: c.saved.platforms?.[platform]?.split('\n')[0] || c.saved.caption,
+      at: slots[i] ? new Date(slots[i]).toISOString() : null,
+    }));
+  }
+
   async platformView(platform) {
     const adapter = this.adapter(platform);
     const mode = this.settings[platform].mode;
     const plan = this.store ? this.schedule(platform, mode) : null;
     const key = this.platformKey(platform, mode);
-    const next = this.store ? (await candidates({ store: this.store, dir: this.dir, platform: key })).slice(0, 5) : [];
+    // Read the queue once: candidates() opens every short's .json, so the
+    // panel and the schedule must not each pay for it.
+    const queue = this.store ? await this.queueFor(key) : [];
+    const next = queue.slice(0, 5);
     const recent = this.store ? this.store.uploadsSince(key, this.now() - 7 * 24 * 3600_000).reverse().slice(0, 8) : [];
     return {
       built: true,
@@ -486,6 +592,8 @@ export class Uploader {
         score: c.score,
         title: c.saved.platforms?.[platform]?.split('\n')[0] || c.saved.caption,
       })),
+      queued: queue.length,
+      upcoming: this.upcoming(platform, queue),
       recent: recent.map((r) => ({ file: r.file, status: r.status, title: r.title, videoId: r.video_id, error: r.error, at: r.started_at })),
     };
   }
