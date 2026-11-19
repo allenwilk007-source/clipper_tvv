@@ -7,13 +7,14 @@
 
 const POLL_MS = 30_000;
 
-const PLATFORMS = ['youtube', 'tiktok'];
+const PLATFORMS = ['youtube', 'tiktok', 'instagram'];
 
 const els = {
   updated: document.getElementById('updated'),
   refresh: document.getElementById('refresh'),
   youtube: { state: document.getElementById('youtube-state'), body: document.getElementById('youtube-body') },
   tiktok: { state: document.getElementById('tiktok-state'), body: document.getElementById('tiktok-body') },
+  instagram: { state: document.getElementById('instagram-state'), body: document.getElementById('instagram-body') },
 };
 
 const escape = (text) =>
@@ -111,8 +112,9 @@ function render(view) {
     if (!state?.built) continue;
     renderPlatform(name, {
       ...state,
-      label: name === 'tiktok' ? 'TikTok' : 'YouTube',
-      rolling: name === 'tiktok',
+      label: { tiktok: 'TikTok', instagram: 'Instagram', youtube: 'YouTube' }[name],
+      // YouTube resets on a calendar day; the other two count a moving 24h.
+      rolling: name !== 'youtube',
     });
   }
   const total = PLATFORMS.reduce((sum, name) => sum + (view[name]?.upcoming?.length || 0), 0);

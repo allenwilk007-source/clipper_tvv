@@ -10,7 +10,11 @@ running it. These terms describe the basis on which it is provided.
 
 It watches public Twitch streams to find moments worth clipping, cuts short
 videos from them to local disk, and — once connected — reads the operator's
-own TikTok and YouTube account statistics and can send videos to those accounts.
+own TikTok and YouTube account statistics and can send videos to the
+operator's own TikTok, YouTube and Instagram accounts.
+
+A TikTok upload arrives as a draft the operator posts themselves; YouTube and
+Instagram uploads are published directly.
 
 ## No warranty
 
@@ -46,8 +50,8 @@ responsibility.
 ## Platform rules
 
 Using this tool does not exempt anyone from the rules of the platforms it
-connects to. The operator must comply with TikTok's, YouTube's and Twitch's
-terms, developer policies and community guidelines.
+connects to. The operator must comply with TikTok's, YouTube's, Meta's and
+Twitch's terms, developer policies and community guidelines.
 
 The tool connects to those platforms **only through their official APIs**, with
 credentials the account owner has granted. It does not automate any platform's

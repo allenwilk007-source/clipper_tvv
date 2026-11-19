@@ -100,27 +100,57 @@ What to expect:
 
 ## Instagram
 
+**Read this first — it corrects earlier advice in this file.** Instagram has
+two API flavours, and the simpler one cannot be used here:
+
+| Flavour | Needs a Facebook Page? | Can it post a file from this PC? |
+| --- | --- | --- |
+| Instagram API with **Instagram Login** | No | **No.** Publishing takes a `video_url` that Meta's servers fetch: "the media must be hosted on a publicly accessible server at the time of the attempt". |
+| Instagram API with **Facebook Login** | Yes | **Yes** — it accepts the bytes directly. |
+
+So the Facebook Page is not a formality to skip. Without it the only way to
+post would be to publish every clip to the open internet first, so that Meta
+could download it back. That is why the setup below is the longer one.
+
 1. In the Instagram app, switch your account to **Professional** (Creator or
    Business): Settings → Account type and tools.
-2. Open **developers.facebook.com → My Apps → Create app**, and pick the use
-   case for **managing content on Instagram**.
-3. Add **Instagram → API setup with Instagram login**, and add your Instagram
-   account as an **Instagram tester** (then accept the invite in the Instagram
-   app or website).
-4. Permissions: `instagram_business_basic` and
-   `instagram_business_content_publish`.
-5. Redirect URI: like TikTok, this wants `https://`. Leave it for now.
-6. Copy the **Instagram app ID** and **app secret** into `.env`:
+2. Link it to a **Facebook Page** you administer. In Instagram: Settings →
+   Account → Sharing to other apps → Facebook. Create a Page if you have none;
+   it needs no content, it is only the connection Meta requires.
+3. Open **developers.facebook.com → My Apps → Create app**, pick the
+   **Business** type, and add **Instagram → API setup with Facebook login**.
+4. Permissions: `instagram_basic`, `instagram_content_publish`,
+   `pages_show_list`, `pages_read_engagement`.
+5. Under **Facebook Login → Settings**, add the redirect URI
+   `http://localhost:3000/auth/instagram/callback`. If Meta refuses a plain
+   `http://` address, use an `https://` one you control and set the same value
+   in `.env` as `INSTAGRAM_REDIRECT_URI=`.
+6. Copy the **app ID** and **app secret** into `.env`:
 
    ```
    INSTAGRAM_APP_ID=...
    INSTAGRAM_APP_SECRET=...
    ```
+7. Restart `npm start` and press **Connect** next to Instagram in the page.
 
-What to expect: while the app is in development mode, it can publish to
-accounts that have a role on it (yours), which is all this needs. Instagram
-publishes directly; there is no draft step, so the button will ask before
-posting.
+What to expect: Instagram publishes for real — no draft step, unlike TikTok —
+and the caption with the credit line and stream link goes out with the Reel.
+The cap is **50 posts in a moving 24 hours**; `INSTAGRAM_PER_DAY` defaults to
+45. That is a lot of Reels a day, and the API allowing it does not mean it is
+good for the account, so lower it if reach matters more than volume.
+
+Two things that are **not confirmed** and will only be settled by trying:
+
+- Meta says "If your app only serves your Instagram professional account or an
+  account you manage, Standard Access is all your app needs", then warns that
+  some features may need Advanced Access (which requires App Review and
+  Business Verification). Whether publishing works without review is not
+  stated outright.
+- Page Publishing Authorization may have to be completed on the Page before it
+  will publish anything.
+
+If Connect fails, the message says which step: no Page, no Instagram account
+linked to the Page, or not enough rights on the Page.
 
 ---
 

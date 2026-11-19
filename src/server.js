@@ -11,14 +11,34 @@ import { Automation, SHORT_FILE, parseRange } from './automation.js';
 import { Feed } from './feed.js';
 import { acquireLock, lockMessage } from './lock.js';
 import { PLATFORMS, Uploader } from './uploader.js';
+import * as instagram from './instagram.js';
 import * as tiktok from './tiktok.js';
 import { StatsCache, statsErrorKind } from './ytstats.js';
 import * as youtube from './youtube.js';
 
-// Each platform's sign-in, so the two auth routes are one piece of code.
+// Each platform's sign-in, so one pair of auth routes serves all of them.
+// `finish` turns the code from the callback into whatever that platform wants
+// kept on disk: for YouTube and TikTok one exchange, for Instagram three calls
+// (code -> short-lived -> 60-day token -> the Page's Instagram account).
 const SIGN_IN = {
-  youtube: { api: youtube, keys: () => youtube.youtubeKeys(), envHint: 'YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET' },
-  tiktok: { api: tiktok, keys: () => tiktok.tiktokKeys(), envHint: 'TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET' },
+  youtube: {
+    api: youtube,
+    keys: () => youtube.youtubeKeys(),
+    envHint: 'YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET',
+    finish: (keys, code) => youtube.exchangeCode(keys, code),
+  },
+  tiktok: {
+    api: tiktok,
+    keys: () => tiktok.tiktokKeys(),
+    envHint: 'TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET',
+    finish: (keys, code) => tiktok.exchangeCode(keys, code),
+  },
+  instagram: {
+    api: instagram,
+    keys: () => instagram.instagramKeys(),
+    envHint: 'INSTAGRAM_APP_ID and INSTAGRAM_APP_SECRET',
+    finish: (keys, code) => instagram.connect(keys, code),
+  },
 };
 
 // Enough for the biggest plausible clip request and nothing like enough to be
@@ -333,7 +353,7 @@ const server = createServer(async (req, res) => {
   const auth = /^\/auth\/([a-z]+)(\/callback)?$/.exec(url.pathname);
   if (auth && SIGN_IN[auth[1]]) {
     const platform = auth[1];
-    const { api, keys: readKeys, envHint } = SIGN_IN[platform];
+    const { api, keys: readKeys, envHint, finish } = SIGN_IN[platform];
     const keys = readKeys();
 
     if (!auth[2]) {
@@ -362,7 +382,7 @@ const server = createServer(async (req, res) => {
       return;
     }
     try {
-      await api.saveToken(await api.exchangeCode(keys, code));
+      await api.saveToken(await finish(keys, code));
       uploader.connected(platform);
       feed.log(`upload: ${platform} connected`);
       redirect(res, `/?${platform}=connected#uploads`);

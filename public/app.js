@@ -796,6 +796,12 @@ const up = {
     status: document.getElementById('tt-status'),
     next: document.getElementById('tt-next'),
   },
+  instagram: {
+    connect: document.getElementById('ig-connect'),
+    mode: document.getElementById('ig-mode'),
+    status: document.getElementById('ig-status'),
+    next: document.getElementById('ig-next'),
+  },
 };
 
 const clock = (iso) => new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
@@ -837,10 +843,12 @@ function renderPlatform(name, state) {
   );
 }
 
+// Named apart from the PLATFORMS above, which maps the manual-post links.
+const UPLOAD_PLATFORMS = ['youtube', 'tiktok', 'instagram'];
+
 function renderUploads(view) {
   up.box.hidden = false;
-  renderPlatform('youtube', view.youtube);
-  renderPlatform('tiktok', view.tiktok);
+  for (const name of UPLOAD_PLATFORMS) renderPlatform(name, view[name]);
 }
 
 async function pollUploads(change) {
@@ -860,7 +868,7 @@ async function pollUploads(change) {
   }
 }
 
-for (const platform of ['youtube', 'tiktok']) {
+for (const platform of UPLOAD_PLATFORMS) {
   up[platform].mode.addEventListener('change', () => pollUploads({ platform, mode: up[platform].mode.value }));
 }
 

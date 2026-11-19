@@ -37,6 +37,7 @@ import { basename, join } from 'node:path';
 
 import { config } from './config.js';
 import { KEEP_SCORE } from './engagement.js';
+import * as instagram from './instagram.js';
 import { recopy } from './recopy.js';
 import { probe } from './shortform.js';
 import * as tiktok from './tiktok.js';
@@ -45,7 +46,7 @@ import * as youtube from './youtube.js';
 
 const num = (value, fallback) => (Number.isFinite(Number(value)) && String(value).trim() !== '' ? Number(value) : fallback);
 
-export const PLATFORMS = ['youtube', 'tiktok'];
+export const PLATFORMS = ['youtube', 'tiktok', 'instagram'];
 
 export const uploadConfig = (env = process.env) => ({
   youtube: {
@@ -63,9 +64,22 @@ export const uploadConfig = (env = process.env) => ({
     // 24 hours over 5 is a little under five hours.
     spacingMinutes: num(env.TIKTOK_SPACING_MINUTES, 280),
   },
+  instagram: {
+    // Instagram's documented cap is 50 published posts in a moving 24 hours;
+    // 45 leaves room for a failed attempt, which counts too. Worth saying
+    // plainly: 45 Reels a day is a great many, and the API permitting it is
+    // not the same as it being good for the account. INSTAGRAM_PER_DAY.
+    perDay: num(env.INSTAGRAM_PER_DAY, 45),
+    spacingMinutes: num(env.INSTAGRAM_SPACING_MINUTES, 32),
+    // A Reel also appearing on the profile grid. Off is the quieter choice.
+    shareToFeed: env.INSTAGRAM_SHARE_TO_FEED !== 'false',
+  },
 });
 
 export const MODES = ['off', 'dry-run', 'on'];
+
+// Both TikTok and Instagram count their caps over a moving 24 hours.
+const ROLLING_WINDOW_MS = 24 * 3600_000;
 
 // How long a read of the queue may be reused. See Uploader#queueCache.
 const QUEUE_TTL_MS = 5_000;
@@ -184,7 +198,7 @@ export function projectSlots({ taken = [], count, now, perDay, spacingMinutes, r
   const spent = [...taken].filter(Number.isFinite).sort((a, b) => a - b);
 
   const windowed = (at) =>
-    rolling ? spent.filter((t) => t > at - tiktok.CAP_WINDOW_MS && t <= at) : spent.filter((t) => pacificDayStart(t) === pacificDayStart(at));
+    rolling ? spent.filter((t) => t > at - ROLLING_WINDOW_MS && t <= at) : spent.filter((t) => pacificDayStart(t) === pacificDayStart(at));
 
   const out = [];
   let last = spent.length ? spent[spent.length - 1] : Number.NEGATIVE_INFINITY;
@@ -197,7 +211,7 @@ export function projectSlots({ taken = [], count, now, perDay, spacingMinutes, r
       if (used.length < perDay) break;
       // Rolling: room appears as the oldest attempt ages out of the window.
       // Calendar: not until the next Pacific midnight.
-      at = rolling ? used[0] + tiktok.CAP_WINDOW_MS : pacificDayStart(pacificDayStart(at) + 26 * 3600_000);
+      at = rolling ? used[0] + ROLLING_WINDOW_MS : pacificDayStart(pacificDayStart(at) + 26 * 3600_000);
       at = Math.max(at, last + spacing);
     }
     out.push(at);
@@ -206,6 +220,23 @@ export function projectSlots({ taken = [], count, now, perDay, spacingMinutes, r
     last = at;
   }
   return out;
+}
+
+/**
+ * The Instagram caption for a short.
+ *
+ * Unlike TikTok's inbox, this one IS sent: Instagram's container takes the
+ * caption, so the credit and the link back go out with the Reel rather than
+ * being handed to the owner to paste.
+ */
+export function instagramPost(candidate, { avoid = [] } = {}) {
+  const parts = recopy({ file: candidate.file, saved: candidate.saved, avoid });
+  const body = parts.platforms.instagram.trim();
+  assertGameMatches(body, candidate.saved.game);
+  const full = parts.link ? `${body}\n${parts.linkLabel}: ${parts.link}` : body;
+  // Instagram's limit is 2200 characters; the copy is nowhere near it, but a
+  // caption refused for length would cost a slot.
+  return { title: body.split('\n')[0], caption: full.slice(0, 2200) };
 }
 
 export class Uploader {
@@ -220,18 +251,21 @@ export class Uploader {
     now = () => Date.now(),
     yt = youtube,
     tt = tiktok,
+    ig = instagram,
     check = async (video) => {
       const { duration } = await probe(video);
       return validateShort(video, { expectSeconds: duration });
     },
   } = {}) {
-    Object.assign(this, { store, dir, log, cfg, settingsPath, dryRunLog, now, yt, tt, check });
+    Object.assign(this, { store, dir, log, cfg, settingsPath, dryRunLog, now, yt, tt, ig, check });
     // `keys` stays the YouTube keys: the server's /auth/youtube route uses it.
     this.keys = yt.youtubeKeys(env);
     this.tiktokKeys = tt.tiktokKeys(env);
-    this.settings = { youtube: { mode: 'off' }, tiktok: { mode: 'off' } };
+    this.instagramKeys = ig.instagramKeys(env);
+    this.settings = {};
     this.state = {};
     for (const platform of PLATFORMS) {
+      this.settings[platform] = { mode: 'off' };
       this.state[platform] = { blockedUntil: 0, blockedReason: null, lastError: null, connected: false };
     }
     this.busy = false;
@@ -287,6 +321,43 @@ export class Uploader {
             status: result.status,
             confirmError: result.confirmError || null,
           };
+        },
+      },
+      instagram: {
+        label: 'Instagram',
+        envHint: 'INSTAGRAM_APP_ID and INSTAGRAM_APP_SECRET',
+        // "50 published posts within a 24 hour moving period."
+        window: 'rolling-24h',
+        capNote: '24-hour posting cap is used up',
+        hasKeys: () => this.ig.hasKeys(this.instagramKeys),
+        savedToken: () => this.ig.loadToken(),
+        forgetToken: () => this.ig.forgetToken(),
+        post: (candidate, options) => instagramPost(candidate, options),
+        // Not one token but three things: the Page token, the user token and
+        // the account id. Which token publishes is contradicted between Meta's
+        // own pages, so both are carried and `send` tries them in turn.
+        token: async () => this.ig.tokensFor(this.instagramKeys, { now: this.now() }),
+        send: async ({ token, candidate, post }) => {
+          const attempt = (access) =>
+            this.ig.uploadVideo({
+              token: access,
+              igUserId: token.igUserId,
+              file: candidate.video,
+              caption: post.caption,
+              shareToFeed: this.cfg.instagram.shareToFeed,
+            });
+          let mediaId;
+          try {
+            mediaId = await attempt(token.pageToken || token.userToken);
+          } catch (err) {
+            // The documented ambiguity, resolved by trying rather than by
+            // asking the owner to guess. Only ever one retry.
+            if (err.kind !== 'auth' || !token.pageToken || !token.userToken) throw err;
+            this.log('upload: Instagram would not take the Page token; trying the user token');
+            mediaId = await attempt(token.userToken);
+          }
+          const link = await this.ig.permalink({ token: token.pageToken || token.userToken, mediaId });
+          return { id: mediaId, where: link || `Instagram (media ${mediaId})` };
         },
       },
     };
@@ -369,10 +440,10 @@ export class Uploader {
    */
   capWindow(platform, key, now) {
     if (this.adapter(platform).window === 'rolling-24h') {
-      const spent = this.store.uploadsSince(key, now - tiktok.CAP_WINDOW_MS).filter((r) => SPENT.has(r.status));
+      const spent = this.store.uploadsSince(key, now - ROLLING_WINDOW_MS).filter((r) => SPENT.has(r.status));
       const times = spent.map((r) => Date.parse(r.started_at)).filter(Number.isFinite);
       const oldest = times.length ? Math.min(...times) : now;
-      return { used: spent.length, resetAt: oldest + tiktok.CAP_WINDOW_MS };
+      return { used: spent.length, resetAt: oldest + ROLLING_WINDOW_MS };
     }
     const dayStart = pacificDayStart(now);
     const spent = this.store.uploadsSince(key, dayStart).filter((r) => SPENT.has(r.status));
@@ -607,7 +678,10 @@ export class Uploader {
         draftsOnly: true,
         draftNote: 'TikTok uploads arrive as a draft in your inbox — open TikTok to post it. Going straight to your profile needs the video.publish scope and TikTok’s audit.',
       },
-      instagram: { built: false },
+      instagram: {
+        ...(await this.platformView('instagram')),
+        shareToFeed: this.cfg.instagram.shareToFeed,
+      },
     };
   }
 }

@@ -251,7 +251,7 @@ test('it cannot be switched on without keys and a sign-in', async () => {
   const { u } = uploader({ store, dir });
   u.state.youtube.connected = false;
   await assert.rejects(u.setMode('youtube', 'on'), /connect YouTube first/);
-  await assert.rejects(u.setMode('instagram', 'on'), /not built yet/);
+  await assert.rejects(u.setMode('snapchat', 'on'), /not built yet/);
   await u.setMode('youtube', 'dry-run');
   assert.equal(u.settings.youtube.mode, 'dry-run');
 });

@@ -27,6 +27,8 @@ connected accounts:
 | TikTok | Profile basics (open id, avatar, display name), account statistics (followers, following, likes, video count), and the list of the operator's own public videos with their view, like and comment counts | To show the operator how their own posts are performing |
 | TikTok | — | With `video.upload`, it sends a video to the operator's own TikTok inbox **as a draft**, for the operator to review and post themselves |
 | YouTube | The operator's own channel totals and their own videos' statistics; uploads to the operator's own channel | The same, for YouTube |
+| Instagram | The list of Facebook Pages the operator administers, and the id and username of the Instagram professional account linked to one of them | To know which account to post to. Instagram's API reaches a professional account through its linked Page; there is no other route that can post a file from this computer |
+| Instagram | — | With `instagram_content_publish`, it uploads a video as a Reel to that account, with a caption |
 | Twitch | Public stream and clip metadata, and public chat messages in public channels | To find moments worth clipping |
 
 It does **not** request access to anyone else's account, to direct messages,
@@ -46,8 +48,8 @@ nobody to disclose it to.
 
 The only network connections it makes are directly to the platforms named
 above, to the APIs it has been authorised to use, plus
-`tiktok.com`-, `googleapis.com`- and `twitch.tv`-hosted media it downloads on
-the operator's instruction.
+`tiktok.com`-, `googleapis.com`-, `facebook.com`- and `twitch.tv`-hosted media
+it downloads on the operator's instruction.
 
 ## Access tokens
 
@@ -76,8 +78,9 @@ Everything lives in the project folder on the operator's computer.
 - **To delete the collected data:** delete the `data/` and `clips/` folders.
 - **To revoke access:** disconnect the app in the platform's own settings
   (TikTok: Settings → Security and permissions → Manage app permissions;
-  Google: myaccount.google.com → Data and privacy → Third-party apps), and
-  delete the token files in `data/`.
+  Google: myaccount.google.com → Data and privacy → Third-party apps;
+  Instagram and Facebook: facebook.com → Settings → Business integrations),
+  and delete the token files in `data/`.
 
 Revoking on the platform side immediately stops this tool from being able to
 read anything, whether or not the local files are deleted.

@@ -253,7 +253,9 @@ test('it cannot be switched on without keys and a sign-in', async () => {
 
   u.state.tiktok.connected = false;
   await assert.rejects(u.setMode('tiktok', 'on'), /connect TikTok first/);
-  await assert.rejects(u.setMode('instagram', 'on'), /not built yet/);
+  await assert.rejects(u.setMode('snapchat', 'on'), /not built yet/);
+  // Instagram IS built now, so it gets the keys message rather than that one.
+  await assert.rejects(u.setMode('instagram', 'on'), /INSTAGRAM_APP_ID/);
   await u.setMode('tiktok', 'dry-run');
   assert.equal(u.settings.tiktok.mode, 'dry-run');
 
@@ -286,5 +288,7 @@ test('the page says plainly that TikTok uploads are drafts', async () => {
   assert.equal(view.tiktok.draftsOnly, true);
   assert.match(view.tiktok.draftNote, /draft in your inbox/);
   assert.equal(view.tiktok.perDay, 5);
-  assert.equal(view.instagram.built, false);
+  // Instagram posts for real, so it carries no draft note.
+  assert.equal(view.instagram.built, true);
+  assert.equal(view.instagram.draftsOnly, undefined);
 });

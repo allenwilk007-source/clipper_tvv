@@ -121,7 +121,20 @@
         </div>
         <p class="uploads-status" id="tt-status"></p>
         <ol class="uploads-list" id="tt-next"></ol>
-        <p class="uploads-note">Instagram upload is not built yet.</p>
+        <div class="uploads-row">
+          <span class="uploads-platform">Instagram</span>
+          <a class="uploads-connect" id="ig-connect" href="/auth/instagram">Connect</a>
+          <label class="uploads-mode"
+            >Mode
+            <select id="ig-mode">
+              <option value="off">Off</option>
+              <option value="dry-run">Dry run (log only)</option>
+              <option value="on">On: upload</option>
+            </select>
+          </label>
+        </div>
+        <p class="uploads-status" id="ig-status"></p>
+        <ol class="uploads-list" id="ig-next"></ol>
       </div>
       <div class="shorts" id="shorts"></div>
     </section>
