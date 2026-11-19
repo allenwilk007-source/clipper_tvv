@@ -784,37 +784,50 @@ auto.form.addEventListener('submit', async (event) => {
 
 const up = {
   box: document.getElementById('uploads'),
-  connect: document.getElementById('yt-connect'),
-  mode: document.getElementById('yt-mode'),
-  status: document.getElementById('yt-status'),
-  next: document.getElementById('yt-next'),
+  youtube: {
+    connect: document.getElementById('yt-connect'),
+    mode: document.getElementById('yt-mode'),
+    status: document.getElementById('yt-status'),
+    next: document.getElementById('yt-next'),
+  },
+  tiktok: {
+    connect: document.getElementById('tt-connect'),
+    mode: document.getElementById('tt-mode'),
+    status: document.getElementById('tt-status'),
+    next: document.getElementById('tt-next'),
+  },
 };
 
 const clock = (iso) => new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
-function renderUploads(view) {
-  const yt = view.youtube;
-  up.box.hidden = false;
-  up.connect.textContent = !yt.keys ? 'Needs keys in .env' : yt.connected ? 'Connected · reconnect' : 'Connect';
-  up.connect.toggleAttribute('aria-disabled', !yt.keys);
-  if (document.activeElement !== up.mode) up.mode.value = yt.mode;
-  up.mode.querySelector('[value="on"]').disabled = !yt.connected;
+function renderPlatform(name, state) {
+  const els = up[name];
+  if (!els || !state?.built) return;
+  els.connect.textContent = !state.keys ? 'Needs keys in .env' : state.connected ? 'Connected · reconnect' : 'Connect';
+  els.connect.toggleAttribute('aria-disabled', !state.keys);
+  if (document.activeElement !== els.mode) els.mode.value = state.mode;
+  els.mode.querySelector('[value="on"]').disabled = !state.connected;
 
   const bits = [];
-  if (yt.mode === 'off') bits.push('Off: nothing is uploaded.');
+  if (state.mode === 'off') bits.push('Off: nothing is uploaded.');
   else {
-    bits.push(`${yt.mode === 'dry-run' ? 'Dry run' : 'Uploading'} · ${yt.today} of ${yt.perDay} today`);
-    if (yt.nextAt) bits.push(`next at ${clock(yt.nextAt)}${yt.waitingFor ? ` (${yt.waitingFor})` : ''}`);
-    bits.push(`every ${Math.round(yt.spacingMinutes / 60)}h, best score first`);
-    if (yt.mode === 'on' && yt.privacy !== 'private') bits.push('Google keeps uploads private until its audit passes');
+    const doing = state.mode === 'dry-run' ? 'Dry run' : state.draftsOnly ? 'Sending drafts' : 'Uploading';
+    bits.push(`${doing} · ${state.today} of ${state.perDay} today`);
+    if (state.nextAt) bits.push(`next at ${clock(state.nextAt)}${state.waitingFor ? ` (${state.waitingFor})` : ''}`);
+    bits.push(`every ${Math.round(state.spacingMinutes / 60)}h, best score first`);
+    // The honest ceiling, said where the switch is rather than in a doc.
+    if (state.mode === 'on' && state.draftsOnly) bits.push('arrives as a draft — open TikTok to post it');
+    if (state.mode === 'on' && !state.draftsOnly && state.privacy && state.privacy !== 'private') {
+      bits.push('Google keeps uploads private until its audit passes');
+    }
   }
-  if (yt.lastError) bits.push(`last error: ${yt.lastError}`);
-  up.status.textContent = bits.join(' · ');
-  up.status.classList.toggle('is-error', Boolean(yt.lastError));
+  if (state.lastError) bits.push(`last error: ${state.lastError}`);
+  els.status.textContent = bits.join(' · ');
+  els.status.classList.toggle('is-error', Boolean(state.lastError));
 
-  const posted = yt.recent.map((r) => `${r.status === 'dry-run' ? 'would post' : r.status}: ${r.title || r.file}`);
-  const queued = yt.next.map((c) => `next (${c.score}): ${c.title}`);
-  up.next.replaceChildren(
+  const posted = state.recent.map((r) => `${r.status === 'dry-run' ? 'would post' : r.status}: ${r.title || r.file}`);
+  const queued = state.next.map((c) => `next (${c.score}): ${c.title}`);
+  els.next.replaceChildren(
     ...[...queued.slice(0, 3), ...posted.slice(0, 3)].map((text) => {
       const li = document.createElement('li');
       li.textContent = text;
@@ -824,13 +837,21 @@ function renderUploads(view) {
   );
 }
 
+function renderUploads(view) {
+  up.box.hidden = false;
+  renderPlatform('youtube', view.youtube);
+  renderPlatform('tiktok', view.tiktok);
+}
+
 async function pollUploads(change) {
   try {
     const res = await fetch('/api/uploads', change ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(change) } : {});
     const body = await res.json();
     if (!res.ok) {
-      up.status.textContent = body.message || `upload settings returned ${res.status}`;
-      up.status.classList.add('is-error');
+      // Shown against the switch that was just moved, not the other one's.
+      const els = up[change?.platform] || up.youtube;
+      els.status.textContent = body.message || `upload settings returned ${res.status}`;
+      els.status.classList.add('is-error');
       return;
     }
     renderUploads(body);
@@ -839,7 +860,9 @@ async function pollUploads(change) {
   }
 }
 
-up.mode.addEventListener('change', () => pollUploads({ platform: 'youtube', mode: up.mode.value }));
+for (const platform of ['youtube', 'tiktok']) {
+  up[platform].mode.addEventListener('change', () => pollUploads({ platform, mode: up[platform].mode.value }));
+}
 
 // ?demo=1 renders a fixture feed, and automation would act on the real one.
 if (!new URLSearchParams(location.search).has('demo')) {

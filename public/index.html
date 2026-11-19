@@ -88,8 +88,8 @@
       <p class="auto-error" id="auto-error" hidden></p>
       <p class="auto-status" id="auto-status"></p>
       <div class="uploads" id="uploads" hidden>
+        <strong class="uploads-title">Auto upload</strong>
         <div class="uploads-row">
-          <strong>Auto upload</strong>
           <span class="uploads-platform">YouTube</span>
           <a class="uploads-connect" id="yt-connect" href="/auth/youtube">Connect</a>
           <label class="uploads-mode"
@@ -103,7 +103,21 @@
         </div>
         <p class="uploads-status" id="yt-status"></p>
         <ol class="uploads-list" id="yt-next"></ol>
-        <p class="uploads-note">Instagram and TikTok upload are not built yet.</p>
+        <div class="uploads-row">
+          <span class="uploads-platform">TikTok</span>
+          <a class="uploads-connect" id="tt-connect" href="/auth/tiktok">Connect</a>
+          <label class="uploads-mode"
+            >Mode
+            <select id="tt-mode">
+              <option value="off">Off</option>
+              <option value="dry-run">Dry run (log only)</option>
+              <option value="on">On: send drafts</option>
+            </select>
+          </label>
+        </div>
+        <p class="uploads-status" id="tt-status"></p>
+        <ol class="uploads-list" id="tt-next"></ol>
+        <p class="uploads-note">Instagram upload is not built yet.</p>
       </div>
       <div class="shorts" id="shorts"></div>
     </section>

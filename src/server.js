@@ -10,9 +10,16 @@ import { config, credentialsMissing, nothingToRun, root } from './config.js';
 import { Automation, SHORT_FILE, parseRange } from './automation.js';
 import { Feed } from './feed.js';
 import { acquireLock, lockMessage } from './lock.js';
-import { Uploader } from './uploader.js';
+import { PLATFORMS, Uploader } from './uploader.js';
+import * as tiktok from './tiktok.js';
 import { StatsCache, statsErrorKind } from './ytstats.js';
 import * as youtube from './youtube.js';
+
+// Each platform's sign-in, so the two auth routes are one piece of code.
+const SIGN_IN = {
+  youtube: { api: youtube, keys: () => youtube.youtubeKeys(), envHint: 'YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET' },
+  tiktok: { api: tiktok, keys: () => tiktok.tiktokKeys(), envHint: 'TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET' },
+};
 
 // Enough for the biggest plausible clip request and nothing like enough to be
 // worth sending as a denial-of-service payload.
@@ -45,8 +52,9 @@ const uploader = new Uploader({ store: feed.store, dir: automation.dir, log: (me
 // the quota cost between them.
 const statsCache = new StatsCache();
 
-// Sign-in round trips in flight: the state Google hands back must be one this
-// server sent, or the callback is someone else's and is refused.
+// Sign-in round trips in flight: the state the platform hands back must be one
+// this server sent, for that same platform, or the callback is someone else's
+// and is refused.
 const signIns = new Map();
 
 function redirect(res, location) {
@@ -268,13 +276,16 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST') {
       try {
         const body = await readJsonBody(req);
-        if (body.platform !== 'youtube') throw new Error(`${body.platform} upload is not built yet`);
+        const platform = body.platform;
+        if (!PLATFORMS.includes(platform)) throw new Error(`${platform} upload is not built yet`);
         if (body.disconnect) {
-          await uploader.setMode('youtube', 'off');
-          await youtube.forgetToken();
-          uploader.state.youtube.connected = false;
+          // Off before the token goes, so a tick in between cannot find a
+          // mode of "on" with nothing to sign in with.
+          await uploader.setMode(platform, 'off');
+          await SIGN_IN[platform].api.forgetToken();
+          uploader.state[platform].connected = false;
         } else {
-          await uploader.setMode('youtube', body.mode);
+          await uploader.setMode(platform, body.mode);
         }
       } catch (err) {
         sendJson(res, 400, { error: 'bad_request', message: err.message });
@@ -317,38 +328,47 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  // GET /auth/youtube -> Google's consent page; /auth/youtube/callback <- back
-  if (url.pathname === '/auth/youtube') {
-    if (!youtube.hasKeys(uploader.keys)) {
-      res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' }).end('Add YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET to .env, then restart.');
+  // GET /auth/<platform> -> that platform's own consent page;
+  // GET /auth/<platform>/callback <- back again.
+  const auth = /^\/auth\/([a-z]+)(\/callback)?$/.exec(url.pathname);
+  if (auth && SIGN_IN[auth[1]]) {
+    const platform = auth[1];
+    const { api, keys: readKeys, envHint } = SIGN_IN[platform];
+    const keys = readKeys();
+
+    if (!auth[2]) {
+      if (!api.hasKeys(keys)) {
+        res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' }).end(`Add ${envHint} to .env, then restart.`);
+        return;
+      }
+      const state = randomBytes(16).toString('hex');
+      // The platform is remembered with the state, so a state issued for one
+      // platform cannot be handed back on the other's callback.
+      signIns.set(state, { platform, at: Date.now() });
+      redirect(res, api.authUrl(keys, state));
       return;
     }
-    const state = randomBytes(16).toString('hex');
-    signIns.set(state, Date.now());
-    redirect(res, youtube.authUrl(uploader.keys, state));
-    return;
-  }
-  if (url.pathname === '/auth/youtube/callback') {
+
     const state = url.searchParams.get('state') || '';
     const started = signIns.get(state);
     signIns.delete(state);
-    if (!started || Date.now() - started > 10 * 60_000) {
-      redirect(res, '/?youtube=expired#uploads');
+    if (!started || started.platform !== platform || Date.now() - started.at > 10 * 60_000) {
+      redirect(res, `/?${platform}=expired#uploads`);
       return;
     }
     const code = url.searchParams.get('code');
     if (!code) {
-      redirect(res, `/?youtube=${encodeURIComponent(url.searchParams.get('error') || 'cancelled')}#uploads`);
+      redirect(res, `/?${platform}=${encodeURIComponent(url.searchParams.get('error') || 'cancelled')}#uploads`);
       return;
     }
     try {
-      await youtube.saveToken(await youtube.exchangeCode(uploader.keys, code));
-      uploader.connected();
-      feed.log('upload: YouTube connected');
-      redirect(res, '/?youtube=connected#uploads');
+      await api.saveToken(await api.exchangeCode(keys, code));
+      uploader.connected(platform);
+      feed.log(`upload: ${platform} connected`);
+      redirect(res, `/?${platform}=connected#uploads`);
     } catch (err) {
-      feed.log(`upload: connecting YouTube failed: ${err.message}`);
-      redirect(res, `/?youtube=${encodeURIComponent(err.message.slice(0, 120))}#uploads`);
+      feed.log(`upload: connecting ${platform} failed: ${err.message}`);
+      redirect(res, `/?${platform}=${encodeURIComponent(err.message.slice(0, 120))}#uploads`);
     }
     return;
   }
@@ -426,7 +446,10 @@ server.listen(config.port, async () => {
   automation.start();
   await uploader.load();
   uploader.start();
-  console.log(`  Auto upload: YouTube is ${uploader.settings.youtube.mode}.`);
+  console.log(
+    `  Auto upload: ${PLATFORMS.map((p) => `${p} is ${uploader.settings[p].mode}`).join(', ')}` +
+      ` (TikTok uploads arrive as a draft to post from the app).`,
+  );
   console.log(
     `  Automation is ${automation.settings.enabled ? 'ON' : 'off'} for ` +
       `${automation.settings.channels.length} channel(s) - switch it in the page.`,

@@ -59,21 +59,42 @@ What to expect:
 1. Open **developers.tiktok.com**, log in with your TikTok account, and go to
    **Manage apps → Connect an app**.
 2. Add the products **Login Kit** and **Content Posting API**.
-3. Ask for the scope **`video.upload`**. That sends a short to your TikTok
-   **inbox as a draft**: you get a notification in the app, open it, add a
-   trending sound if you want one, and post. That is the closest thing to
-   "opens ready to be posted", and sounds added in the app are the ones that
-   actually ride a trend.
-   (`video.publish`, which posts directly, stays **private-only** until TikTok
-   audits the app.)
-4. Redirect URI: TikTok wants an `https://` address. Leave this blank for now:
-   it gets set up when the TikTok upload is built.
+3. Ask for the scopes **`user.info.basic`**, **`user.info.stats`**,
+   **`video.list`** and **`video.upload`**. The first three are for the stats
+   dashboard; `video.upload` is the one that posts.
+
+   `video.upload` sends a short to your TikTok **inbox as a draft**: you get a
+   notification in the app, open it, add a trending sound if you want one, and
+   post. Sounds added in the app are the ones that actually ride a trend.
+
+   The other endpoint, `video.publish`, posts straight to the profile with no
+   tap — but the app must be approved for that scope **and pass TikTok's
+   audit**, and until it does TikTok restricts everything an unaudited client
+   posts to private viewing. So this tool uses the inbox. It does not try to
+   get around the audit.
+4. Redirect URI: `http://localhost:3000/auth/tiktok/callback`.
+
+   TikTok's form asks for `https://` and may refuse the line above. If it
+   does, give it an `https://` address you control, and put the same one in
+   `.env` as `TIKTOK_REDIRECT_URI=` — it has to match character for character
+   or the sign-in fails at the last step.
 5. Copy the **Client key** and **Client secret** into `.env`:
 
    ```
    TIKTOK_CLIENT_KEY=...
    TIKTOK_CLIENT_SECRET=...
    ```
+6. Restart `npm start`, then press **Connect** next to TikTok in the page and
+   approve it in TikTok. After that, set the TikTok switch to **Dry run** for a
+   day to see which shorts it would send, or straight to **On: send drafts**.
+
+   TikTok allows **5 pending inbox shares in any rolling 24 hours** — rolling,
+   not a calendar day, so the slot frees up 24 hours after each one. Going
+   above 5 just earns a refusal, which is why `TIKTOK_PER_DAY` defaults to 5.
+
+   Because the inbox endpoint has no caption field, the caption this tool
+   would have written — hook, credit and the link back to the stream — is
+   written to the log for you to paste when you finish the post.
 
 ---
 

@@ -189,11 +189,15 @@ test('each failure is handled for what it is', async () => {
     return { result, next, u, store };
   };
 
-  // Quota: stop until midnight Pacific, and say so.
+  // Quota: stop until midnight Pacific, and say so. The short itself goes
+  // back in the queue — the quota is about the account, not about this video,
+  // and striking it off would lose the best short in the queue every time the
+  // allowance runs out mid-upload.
   const quota = await run('quota');
-  assert.equal(quota.result.status, 'failed');
+  assert.equal(quota.result.status, 'retry');
   assert.equal(quota.next, null);
   assert.match(quota.u.schedule().why, /quota/);
+  assert.equal((await candidates({ store: quota.store, dir: quota.u.dir, platform: 'youtube' })).length, 3);
 
   // Refused: that short is never tried again; the next one goes.
   const refused = await run('refused');

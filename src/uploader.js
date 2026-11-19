@@ -1,15 +1,24 @@
-// Automatic upload, YouTube first.
+// Automatic upload: YouTube, and TikTok as a draft in the owner's inbox.
 //
 // The pipeline makes shorts far faster than any platform will take them:
-// YouTube's default quota is about six uploads a day, against dozens of
-// shorts. So this is a selector as much as a sender. Each day it posts the
-// best few — highest engagement score first, only shorts above the keep line,
-// never one flagged weak — evenly spaced, and leaves the rest.
+// YouTube's default quota is about six uploads a day and TikTok allows five
+// pending inbox shares in any 24 hours, against dozens of shorts. So this is a
+// selector as much as a sender. Each day it posts the best few — highest
+// engagement score first, only shorts above the keep line, never one flagged
+// weak — evenly spaced, and leaves the rest.
 //
 // With nobody looking at a short before it goes out, the checks here are the
 // last line: the video is checked again at post time, its game must be one
 // this channel clips, and its tags are rebuilt from its own recorded game, so
 // a mislabelled short cannot reach the channel. clips/rejected is never read.
+//
+// The two platforms differ in three ways that matter here:
+//   * YouTube's quota resets at midnight Pacific — a calendar day. TikTok's
+//     cap is rolling: it lifts when the oldest attempt ages out of 24 hours.
+//   * TikTok rotates its refresh token on every refresh (see tiktok.js).
+//   * A YouTube upload is the post. A TikTok inbox upload is a draft: it
+//     arrives as a notification and the owner taps post. That is the ceiling
+//     for an unaudited app, and it is not worked around.
 //
 // Three modes per platform, off by default:
 //   off      nothing happens
@@ -30,10 +39,13 @@ import { config } from './config.js';
 import { KEEP_SCORE } from './engagement.js';
 import { recopy } from './recopy.js';
 import { probe } from './shortform.js';
+import * as tiktok from './tiktok.js';
 import { validateShort } from './validate.js';
 import * as youtube from './youtube.js';
 
 const num = (value, fallback) => (Number.isFinite(Number(value)) && String(value).trim() !== '' ? Number(value) : fallback);
+
+export const PLATFORMS = ['youtube', 'tiktok'];
 
 export const uploadConfig = (env = process.env) => ({
   youtube: {
@@ -43,6 +55,13 @@ export const uploadConfig = (env = process.env) => ({
     // Even spacing: 5 a day, three hours apart.
     spacingMinutes: num(env.YOUTUBE_SPACING_MINUTES, 180),
     privacy: ['public', 'unlisted', 'private'].includes(env.YOUTUBE_PRIVACY) ? env.YOUTUBE_PRIVACY : 'public',
+  },
+  tiktok: {
+    // TikTok's own words: at most 5 pending shares within any 24-hour period.
+    // Going past it earns a 403, which would spend the slot for nothing.
+    perDay: num(env.TIKTOK_PER_DAY, tiktok.PENDING_CAP),
+    // 24 hours over 5 is a little under five hours.
+    spacingMinutes: num(env.TIKTOK_SPACING_MINUTES, 280),
   },
 });
 
@@ -104,6 +123,14 @@ export async function candidates({ store, dir, platform, games = config.games, k
   return out.sort((a, b) => b.score - a.score || String(b.finishedAt).localeCompare(String(a.finishedAt)));
 }
 
+/** Tags that name a game other than the one the short was recorded in. */
+function assertGameMatches(text, game) {
+  const lower = text.toLowerCase();
+  const name = String(game).toLowerCase();
+  const otherGame = (name.includes('fortnite') && /#gta/.test(lower)) || (name.includes('grand theft auto') && /#fortnite/.test(lower));
+  if (otherGame) throw new Error(`tags name another game than ${game}`);
+}
+
 /**
  * The YouTube post for a short, rebuilt now from its own record rather than
  * trusted from a file written hours ago. Throws if the tags name a game other
@@ -114,12 +141,26 @@ export function youtubePost(candidate, { avoid = [] } = {}) {
   const parts = recopy({ file: candidate.file, saved: candidate.saved, avoid });
   const [title, ...rest] = parts.platforms.youtube.split('\n');
   const description = rest.join('\n').trim();
-  const text = `${title}\n${description}`.toLowerCase();
-  const game = String(candidate.saved.game).toLowerCase();
-  const otherGame = (game.includes('fortnite') && /#gta/.test(text)) || (game.includes('grand theft auto') && /#fortnite/.test(text));
-  if (otherGame) throw new Error(`tags name another game than ${candidate.saved.game}`);
-  const tags = [...new Set(text.match(/#[a-z0-9_]+/g) || [])].map((t) => t.slice(1)).slice(0, 15);
+  assertGameMatches(`${title}\n${description}`, candidate.saved.game);
+  const tags = [...new Set(`${title}\n${description}`.toLowerCase().match(/#[a-z0-9_]+/g) || [])].map((t) => t.slice(1)).slice(0, 15);
   return { title, description, tags };
+}
+
+/**
+ * The TikTok caption for a short.
+ *
+ * The inbox endpoint has no caption field at all — the owner writes it in the
+ * app — so this is not sent anywhere. It is logged and stored beside the
+ * upload so the owner has something complete to paste. TERMS.md promises a
+ * credit line and a link back to the source with every clip; the TikTok hook
+ * carries the credit, so the link is appended here.
+ */
+export function tiktokPost(candidate, { avoid = [] } = {}) {
+  const parts = recopy({ file: candidate.file, saved: candidate.saved, avoid });
+  const title = parts.platforms.tiktok.trim();
+  assertGameMatches(title, candidate.saved.game);
+  const caption = parts.link ? `${title}\n${parts.linkLabel}: ${parts.link}` : title;
+  return { title, caption, link: parts.link || null };
 }
 
 export class Uploader {
@@ -133,41 +174,116 @@ export class Uploader {
     dryRunLog = join(config.root, 'data', 'upload-dry-run.jsonl'),
     now = () => Date.now(),
     yt = youtube,
+    tt = tiktok,
     check = async (video) => {
       const { duration } = await probe(video);
       return validateShort(video, { expectSeconds: duration });
     },
   } = {}) {
-    Object.assign(this, { store, dir, log, cfg, settingsPath, dryRunLog, now, yt, check });
+    Object.assign(this, { store, dir, log, cfg, settingsPath, dryRunLog, now, yt, tt, check });
+    // `keys` stays the YouTube keys: the server's /auth/youtube route uses it.
     this.keys = yt.youtubeKeys(env);
-    this.settings = { youtube: { mode: 'off' } };
-    this.state = { youtube: { blockedUntil: 0, blockedReason: null, lastError: null, connected: false } };
+    this.tiktokKeys = tt.tiktokKeys(env);
+    this.settings = { youtube: { mode: 'off' }, tiktok: { mode: 'off' } };
+    this.state = {};
+    for (const platform of PLATFORMS) {
+      this.state[platform] = { blockedUntil: 0, blockedReason: null, lastError: null, connected: false };
+    }
     this.busy = false;
     this.timer = null;
+
+    // Everything platform-specific, in one place, so the scheduling and the
+    // checks above it are written once.
+    this.adapters = {
+      youtube: {
+        label: 'YouTube',
+        envHint: 'YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET',
+        // A calendar day in Pacific time, because that is when the quota resets.
+        window: 'calendar-pacific',
+        capNote: 'daily quota is spent',
+        hasKeys: () => this.yt.hasKeys(this.keys),
+        savedToken: () => this.yt.loadToken(),
+        forgetToken: () => this.yt.forgetToken(),
+        post: (candidate, options) => youtubePost(candidate, options),
+        token: async () => {
+          const kept = await this.yt.loadToken();
+          if (!kept?.refreshToken) throw new youtube.UploadError('not connected', 'auth');
+          return this.yt.accessToken(this.keys, kept.refreshToken);
+        },
+        send: async ({ token, candidate, post }) => {
+          const videoId = await this.yt.uploadVideo({ token, file: candidate.video, privacy: this.cfg.youtube.privacy, ...post });
+          return { id: videoId, where: `https://youtube.com/shorts/${videoId}` };
+        },
+      },
+      tiktok: {
+        label: 'TikTok',
+        envHint: 'TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET',
+        // "At most 5 pending shares within any 24-hour period" — rolling.
+        window: 'rolling-24h',
+        capNote: '24-hour share cap is used up',
+        hasKeys: () => this.tt.hasKeys(this.tiktokKeys),
+        savedToken: () => this.tt.loadToken(),
+        forgetToken: () => this.tt.forgetToken(),
+        post: (candidate, options) => tiktokPost(candidate, options),
+        token: async () => this.tt.accessTokenFor(this.tiktokKeys, { now: this.now() }),
+        send: async ({ token, candidate }) => {
+          const result = await this.tt.uploadVideo({ token, file: candidate.video });
+          return {
+            id: result.publishId,
+            // Not a link to a post: there is no post yet. The owner finishes it.
+            where: 'a draft in your TikTok inbox — open TikTok to post it',
+            status: result.status,
+            confirmError: result.confirmError || null,
+          };
+        },
+      },
+    };
+  }
+
+  adapter(platform) {
+    const found = this.adapters[platform];
+    if (!found) throw new Error(`${platform} upload is not built yet`);
+    return found;
   }
 
   async load() {
     try {
       const saved = JSON.parse(await readFile(this.settingsPath, 'utf8'));
-      if (MODES.includes(saved?.youtube?.mode)) this.settings.youtube.mode = saved.youtube.mode;
+      for (const platform of PLATFORMS) {
+        if (MODES.includes(saved?.[platform]?.mode)) this.settings[platform].mode = saved[platform].mode;
+      }
     } catch {
       /* first run: off */
     }
-    this.state.youtube.connected = Boolean((await this.yt.loadToken())?.refreshToken);
+    for (const platform of PLATFORMS) {
+      this.state[platform].connected = await this.isConnected(platform);
+    }
     const interrupted = this.store?.markInterruptedUploads() || 0;
     if (interrupted) this.log(`upload: ${interrupted} upload(s) were cut off by a restart — not retried, check the channel`);
   }
 
+  /**
+   * A sign-in that is still usable. A refresh token with a known expiry in the
+   * past is not a connection, and saying so beforehand beats finding out by
+   * spending a slot on it.
+   */
+  async isConnected(platform) {
+    const saved = await this.adapter(platform).savedToken();
+    if (!saved?.refreshToken) return false;
+    if (Number.isFinite(saved.refreshExpiresAt) && saved.refreshExpiresAt <= this.now()) return false;
+    return true;
+  }
+
   async setMode(platform, mode) {
-    if (platform !== 'youtube') throw new Error(`${platform} is not built yet`);
+    const adapter = this.adapter(platform);
     if (!MODES.includes(mode)) throw new Error(`mode must be one of ${MODES.join(', ')}`);
-    if (mode === 'on' && !this.yt.hasKeys(this.keys)) throw new Error('add YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET to .env first');
-    if (mode === 'on' && !this.state.youtube.connected) throw new Error('connect YouTube first');
-    this.settings.youtube.mode = mode;
+    if (mode === 'on' && !adapter.hasKeys()) throw new Error(`add ${adapter.envHint} to .env first`);
+    if (mode === 'on' && !this.state[platform].connected) throw new Error(`connect ${adapter.label} first`);
+    this.settings[platform].mode = mode;
     const temp = `${this.settingsPath}.tmp`;
     await writeFile(temp, JSON.stringify(this.settings, null, 2), 'utf8');
     await rename(temp, this.settingsPath);
-    this.log(`upload: YouTube is now ${mode}`);
+    this.log(`upload: ${adapter.label} is now ${mode}`);
   }
 
   start(intervalMs = 60_000) {
@@ -180,46 +296,71 @@ export class Uploader {
     this.timer = null;
   }
 
-  platformKey(mode) {
-    return mode === 'dry-run' ? 'youtube:dry' : 'youtube';
+  platformKey(platform, mode) {
+    return mode === 'dry-run' ? `${platform}:dry` : platform;
+  }
+
+  /**
+   * How much of the cap is used, and when it next lifts.
+   *
+   * Pacific-calendar for YouTube; for TikTok a rolling window, where the cap
+   * lifts as the oldest attempt in it ages out rather than at a clock time.
+   */
+  capWindow(platform, key, now) {
+    if (this.adapter(platform).window === 'rolling-24h') {
+      const spent = this.store.uploadsSince(key, now - tiktok.CAP_WINDOW_MS).filter((r) => SPENT.has(r.status));
+      const times = spent.map((r) => Date.parse(r.started_at)).filter(Number.isFinite);
+      const oldest = times.length ? Math.min(...times) : now;
+      return { used: spent.length, resetAt: oldest + tiktok.CAP_WINDOW_MS };
+    }
+    const dayStart = pacificDayStart(now);
+    const spent = this.store.uploadsSince(key, dayStart).filter((r) => SPENT.has(r.status));
+    // 26 hours on always lands in the next Pacific day, DST or not.
+    return { used: spent.length, resetAt: pacificDayStart(dayStart + 26 * 3600_000) };
   }
 
   /** When the next upload may go, and why not sooner. */
-  schedule(mode = this.settings.youtube.mode) {
-    const key = this.platformKey(mode);
+  schedule(platform = 'youtube', mode = this.settings[platform].mode) {
+    const key = this.platformKey(platform, mode);
     const now = this.now();
-    const dayStart = pacificDayStart(now);
-    const today = this.store.uploadsSince(key, dayStart).filter((r) => SPENT.has(r.status)).length;
-    // 26 hours on always lands in the next Pacific day, DST or not.
-    const resetAt = pacificDayStart(dayStart + 26 * 3600_000);
+    const cfg = this.cfg[platform];
+    const state = this.state[platform];
+    const { used, resetAt } = this.capWindow(platform, key, now);
     const last = this.store.lastUpload(key);
-    const spacingAt = last ? Date.parse(last.started_at) + this.cfg.youtube.spacingMinutes * 60_000 : 0;
-    let nextAt = Math.max(now, spacingAt, this.state.youtube.blockedUntil);
+    const spacingAt = last ? Date.parse(last.started_at) + cfg.spacingMinutes * 60_000 : 0;
+    let nextAt = Math.max(now, spacingAt, state.blockedUntil);
     let why = spacingAt > now ? 'spacing' : null;
-    if (this.state.youtube.blockedUntil > now) why = this.state.youtube.blockedReason;
-    if (today >= this.cfg.youtube.perDay) {
+    if (state.blockedUntil > now) why = state.blockedReason;
+    if (used >= cfg.perDay) {
       nextAt = Math.max(nextAt, resetAt);
-      why = `today's ${this.cfg.youtube.perDay} are done`;
+      why = `today's ${cfg.perDay} are done`;
     }
-    return { today, perDay: this.cfg.youtube.perDay, nextAt, why, resetAt };
+    return { today: used, perDay: cfg.perDay, nextAt, why, resetAt };
   }
 
   async tick() {
-    const mode = this.settings.youtube.mode;
-    if (mode === 'off' || this.busy || !this.store) return null;
-    const plan = this.schedule(mode);
-    if (plan.nextAt > this.now()) return null;
+    if (this.busy || !this.store) return null;
     this.busy = true;
     try {
-      return await this.postOne(mode);
+      // One platform per tick at most, so a long upload never delays the
+      // other's schedule by more than a minute.
+      for (const platform of PLATFORMS) {
+        const mode = this.settings[platform].mode;
+        if (mode === 'off') continue;
+        if (this.schedule(platform, mode).nextAt > this.now()) continue;
+        const result = await this.postOne(platform, mode);
+        if (result) return result;
+      }
+      return null;
     } finally {
       this.busy = false;
     }
   }
 
-  async postOne(mode) {
-    const key = this.platformKey(mode);
-    const state = this.state.youtube;
+  async postOne(platform, mode) {
+    const adapter = this.adapter(platform);
+    const key = this.platformKey(platform, mode);
+    const state = this.state[platform];
     const avoid = this.store
       .uploadsSince(key, this.now() - 3 * 24 * 3600_000)
       .map((r) => String(r.title || '').replace(/\s#.*$/, ''))
@@ -228,7 +369,7 @@ export class Uploader {
       // The checks first: a short that fails them is set aside for good.
       let post;
       try {
-        post = youtubePost(candidate, { avoid });
+        post = adapter.post(candidate, { avoid });
         const checked = await this.check(candidate.video);
         if (!checked.ok) throw new Error(`failed its checks: ${checked.problems.map((p) => p.text).join('; ')}`);
       } catch (err) {
@@ -244,92 +385,121 @@ export class Uploader {
         this.store.finishUpload({ file: candidate.file, platform: key, status: 'dry-run', at: new Date(this.now()) });
         await appendFile(
           this.dryRunLog,
-          `${JSON.stringify({ at: new Date(this.now()).toISOString(), platform: 'youtube', file: candidate.file, score: candidate.score, privacy: this.cfg.youtube.privacy, ...post })}\n`,
+          `${JSON.stringify({ at: new Date(this.now()).toISOString(), platform, file: candidate.file, score: candidate.score, ...post })}\n`,
         );
-        this.log(`upload (dry run): would post ${candidate.file} (score ${candidate.score}) as "${post.title}"`);
-        return { file: candidate.file, status: 'dry-run', title: post.title };
+        this.log(`upload (dry run): would post ${candidate.file} (score ${candidate.score}) to ${adapter.label} as "${post.title}"`);
+        return { platform, file: candidate.file, status: 'dry-run', title: post.title };
       }
 
       // Signed in before anything is claimed: a lapsed sign-in spends nothing.
       let token;
       try {
-        const kept = await this.yt.loadToken();
-        if (!kept?.refreshToken) throw new youtube.UploadError('not connected', 'auth');
-        token = await this.yt.accessToken(this.keys, kept.refreshToken);
+        token = await adapter.token();
       } catch (err) {
-        return this.stopFor(err);
+        return this.stopFor(platform, err);
       }
 
       if (!this.store.claimUpload({ file: candidate.file, platform: key, title: post.title, score: candidate.score, at: new Date(this.now()) })) continue;
-      this.log(`upload: posting ${candidate.file} (score ${candidate.score}) to YouTube as "${post.title}"`);
+      this.log(`upload: posting ${candidate.file} (score ${candidate.score}) to ${adapter.label} as "${post.title}"`);
       try {
-        const videoId = await this.yt.uploadVideo({ token, file: candidate.video, privacy: this.cfg.youtube.privacy, ...post });
-        this.store.finishUpload({ file: candidate.file, platform: key, status: 'done', videoId, at: new Date(this.now()) });
+        const sent = await adapter.send({ token, candidate, post });
+        this.store.finishUpload({ file: candidate.file, platform: key, status: 'done', videoId: sent.id, at: new Date(this.now()) });
         state.lastError = null;
-        this.log(`upload: posted ${candidate.file} → https://youtube.com/shorts/${videoId}`);
-        return { file: candidate.file, status: 'done', videoId };
+        this.log(`upload: posted ${candidate.file} → ${sent.where}`);
+        // The inbox endpoint takes no caption, so the owner is given one.
+        if (post.caption) this.log(`upload: caption to paste for ${candidate.file} —\n${post.caption}`);
+        if (sent.confirmError) this.log(`upload: could not confirm ${candidate.file} with ${adapter.label} (${sent.confirmError}); the upload itself went through`);
+        return { platform, file: candidate.file, status: 'done', videoId: sent.id };
       } catch (err) {
-        const status = { transient: 'retry', refused: 'refused', uncertain: 'uncertain' }[err.kind] || 'failed';
+        // 'retry' is the only status claimUpload will take again, so it is
+        // what every failure that is not about THIS video has to get. A cap
+        // reached mid-upload is the platform's answer about the account, and
+        // striking the short off for it would burn the best one in the queue
+        // — every time, since the next attempt picks the next best. That is
+        // routine on TikTok, whose init refuses outright at 5 pending shares.
+        const status =
+          { transient: 'retry', quota: 'retry', blocked: 'retry', refused: 'refused', uncertain: 'uncertain' }[err.kind] || 'failed';
         this.store.finishUpload({ file: candidate.file, platform: key, status, error: err.message, at: new Date(this.now()) });
-        if (err.kind === 'refused') this.log(`upload: YouTube refused ${candidate.file} — ${err.message}; not retried`);
-        if (err.kind === 'uncertain') this.log(`upload: ${candidate.file} may or may not have posted — ${err.message}; not retried, check the channel`);
+        if (err.kind === 'refused') this.log(`upload: ${adapter.label} refused ${candidate.file} — ${err.message}; not retried`);
+        if (err.kind === 'uncertain') this.log(`upload: ${candidate.file} may or may not have posted — ${err.message}; not retried, check the account`);
         if (err.kind === 'transient') this.log(`upload: ${candidate.file} did not go (${err.message}); will try again after the spacing`);
-        if (err.kind === 'quota' || err.kind === 'auth') this.stopFor(err);
+        if (err.kind === 'quota' || err.kind === 'auth' || err.kind === 'blocked') this.stopFor(platform, err);
         state.lastError = err.message;
-        return { file: candidate.file, status, error: err.message };
+        return { platform, file: candidate.file, status, error: err.message };
       }
     }
     return null;
   }
 
-  /** Quota or sign-in: stop, and say so, rather than keep trying. */
-  stopFor(err) {
-    const state = this.state.youtube;
+  /** Quota, a sign-in or a block: stop, and say so, rather than keep trying. */
+  stopFor(platform, err) {
+    const adapter = this.adapter(platform);
+    const state = this.state[platform];
     state.lastError = err.message;
     if (err.kind === 'quota') {
-      state.blockedUntil = this.schedule().resetAt;
-      state.blockedReason = "YouTube's daily quota is spent";
-      this.log(`upload: YouTube quota spent — stopped until midnight Pacific`);
+      state.blockedUntil = this.schedule(platform).resetAt;
+      state.blockedReason = `${adapter.label}'s ${adapter.capNote}`;
+      this.log(`upload: ${adapter.label} — ${adapter.capNote}; stopped until ${new Date(state.blockedUntil).toISOString()}`);
     } else if (err.kind === 'auth') {
       state.connected = false;
       state.blockedUntil = Number.POSITIVE_INFINITY;
-      state.blockedReason = 'sign-in expired: connect YouTube again';
-      this.log(`upload: YouTube sign-in no longer works (${err.message}) — connect again in the page`);
+      state.blockedReason = `sign-in expired: connect ${adapter.label} again`;
+      this.log(`upload: ${adapter.label} sign-in no longer works (${err.message}) — connect again in the page`);
+    } else if (err.kind === 'blocked') {
+      // Not the sign-in and not this video: the account. Saying "sign-in
+      // expired" here would send the owner to reconnect over and over.
+      state.blockedUntil = Number.POSITIVE_INFINITY;
+      state.blockedReason = `${adapter.label} is refusing this account: ${err.message}`;
+      this.log(`upload: ${adapter.label} is refusing this account (${err.message}) — stopped; this is not something to retry around`);
     } else {
       state.blockedUntil = this.now() + 10 * 60_000;
       state.blockedReason = err.message;
     }
-    return { status: 'stopped', error: err.message };
+    return { platform, status: 'stopped', error: err.message };
   }
 
   /** Called after a successful Connect. */
-  connected() {
-    Object.assign(this.state.youtube, { connected: true, blockedUntil: 0, blockedReason: null, lastError: null });
+  connected(platform = 'youtube') {
+    Object.assign(this.state[platform], { connected: true, blockedUntil: 0, blockedReason: null, lastError: null });
   }
 
-  async view() {
-    const mode = this.settings.youtube.mode;
-    const plan = this.store ? this.schedule(mode) : null;
-    const key = this.platformKey(mode);
+  async platformView(platform) {
+    const adapter = this.adapter(platform);
+    const mode = this.settings[platform].mode;
+    const plan = this.store ? this.schedule(platform, mode) : null;
+    const key = this.platformKey(platform, mode);
     const next = this.store ? (await candidates({ store: this.store, dir: this.dir, platform: key })).slice(0, 5) : [];
     const recent = this.store ? this.store.uploadsSince(key, this.now() - 7 * 24 * 3600_000).reverse().slice(0, 8) : [];
     return {
-      youtube: {
-        keys: this.yt.hasKeys(this.keys),
-        connected: this.state.youtube.connected,
-        mode,
-        privacy: this.cfg.youtube.privacy,
-        spacingMinutes: this.cfg.youtube.spacingMinutes,
-        today: plan?.today ?? 0,
-        perDay: this.cfg.youtube.perDay,
-        nextAt: plan && mode !== 'off' ? new Date(plan.nextAt).toISOString() : null,
-        waitingFor: plan?.why || null,
-        lastError: this.state.youtube.lastError,
-        next: next.map((c) => ({ file: c.file, score: c.score, title: c.saved.platforms?.youtube?.split('\n')[0] || c.saved.caption })),
-        recent: recent.map((r) => ({ file: r.file, status: r.status, title: r.title, videoId: r.video_id, error: r.error, at: r.started_at })),
+      built: true,
+      keys: adapter.hasKeys(),
+      connected: this.state[platform].connected,
+      mode,
+      spacingMinutes: this.cfg[platform].spacingMinutes,
+      today: plan?.today ?? 0,
+      perDay: this.cfg[platform].perDay,
+      nextAt: plan && mode !== 'off' ? new Date(plan.nextAt).toISOString() : null,
+      waitingFor: plan?.why || null,
+      lastError: this.state[platform].lastError,
+      next: next.map((c) => ({
+        file: c.file,
+        score: c.score,
+        title: c.saved.platforms?.[platform]?.split('\n')[0] || c.saved.caption,
+      })),
+      recent: recent.map((r) => ({ file: r.file, status: r.status, title: r.title, videoId: r.video_id, error: r.error, at: r.started_at })),
+    };
+  }
+
+  async view() {
+    return {
+      youtube: { ...(await this.platformView('youtube')), privacy: this.cfg.youtube.privacy },
+      tiktok: {
+        ...(await this.platformView('tiktok')),
+        // Said in the page, not only in a comment: an upload here is a draft.
+        draftsOnly: true,
+        draftNote: 'TikTok uploads arrive as a draft in your inbox — open TikTok to post it. Going straight to your profile needs the video.publish scope and TikTok’s audit.',
       },
       instagram: { built: false },
-      tiktok: { built: false },
     };
   }
 }

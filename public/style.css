@@ -819,6 +819,11 @@ select {
   font-size: 13px;
 }
 
+.uploads-title {
+  display: block;
+  margin-bottom: 8px;
+}
+
 .uploads-row {
   display: flex;
   flex-wrap: wrap;
@@ -826,8 +831,18 @@ select {
   align-items: center;
 }
 
+/* One platform per block: a rule between them, so the second row's switch is
+   not read as belonging to the first one's list of posts. */
+.uploads-list + .uploads-row {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
 .uploads-platform {
   color: var(--muted);
+  /* Keeps the two rows' controls in a column rather than stepped. */
+  min-width: 52px;
 }
 
 .uploads-connect {
